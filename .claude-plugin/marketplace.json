@@ -1,6 +1,13 @@
 {
   "name": "kevlar10x-status-dots",
-  "owner": { "name": "kevlar10x" },
+  "owner": { "name": "kevlar10x", "url": "https://github.com/kevlar10x" },
   "description": "status-dots, a Claude Code mod by kevlar10x",
-  "plugins": [{ "name": "status-dots", "source": "./" }]
+  "plugins": [
+    {
+      "name": "status-dots",
+      "source": "./",
+      "description": "A colored dot in each session's title shows whether it needs you, is done, or was stopped by an error.",
+      "category": "productivity"
+    }
+  ]
 }

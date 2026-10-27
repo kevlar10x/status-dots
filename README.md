@@ -75,9 +75,9 @@ It hooks these events and passes each one on unchanged:
 - `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. It reads Claude's final reply only to see whether its last line is a question. Subagents' turns are skipped.
 - `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
+- `session.start`: registers `/dots`, and takes off a leftover dot when the dots are off.
 
 It has no hook on permission checks, so it never takes part in a permission decision.
-- `session.start`: registers `/dots`, and takes off a leftover dot when the dots are off.
 
 ## Limits
 
@@ -95,5 +95,7 @@ claude plugin uninstall status-dots
 ## License
 
 MIT, by kevlar10x. The original is at https://github.com/kevlar10x/status-dots.
+
+More mods by kevlar10x: [recent-sessions](https://github.com/kevlar10x/recent-sessions) lists your sessions by when each last finished, and [quiet-transcript](https://github.com/kevlar10x/quiet-transcript) fades everything in the transcript except Claude's answers.
 
 If you'd like to leave a tip: https://ko-fi.com/kevlar10x
