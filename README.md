@@ -62,11 +62,14 @@ It calls the desktop app's session tools (`ccd_session_mgmt`) without Claude ask
 - `get_session` and `set_session_title` for the session it runs in, when the dot changes.
 - `list_sessions` and `set_session_title` for your other sessions, only when you run `/dots off`.
 
+Those are the only tools it calls. It runs no commands or programs and fetches nothing from the network. All it sends is a session title, with the dot added or taken off, to the desktop app on your computer.
+
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. Subagents' turns are skipped.
-- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something.
-- `classic.PermissionRequest` and `classic.Notification`: yellow while a permission card is up.
+- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. It reads Claude's final reply only to see whether its last line is a question. Subagents' turns are skipped.
+- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
+- `classic.PermissionRequest`: yellow while a permission card is up. It never answers the permission: the card shows as usual and your choice decides.
+- `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
 - `session.start`: registers `/dots`, and takes off a leftover dot when the dots are off.
 
 ## Limits

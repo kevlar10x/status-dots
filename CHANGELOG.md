@@ -2,6 +2,11 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.2.1 - 2026-10-27
+
+- The permission-card hook is now a plain pass-through, so the Claude directory's check can confirm it never answers a permission for you.
+- The README says exactly which tools the mod calls, what it reads and what it sends.
+
 ## 0.2.0 - 2026-10-27
 
 - The colors now read like a traffic light: red when an error stopped Claude, yellow when it's your turn, green when it's done and needs nothing from you.
