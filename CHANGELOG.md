@@ -2,8 +2,9 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
-## Unreleased
+## 0.3.0 - 2026-10-27
 
+- A session that finishes while you aren't looking at it now gets a blue dot. It turns green once you open the session, so the list shows which finishes you haven't seen yet.
 - The README has a screenshot of the sidebar with the dots.
 
 ## 0.2.1 - 2026-10-27

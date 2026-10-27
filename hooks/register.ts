@@ -1,4 +1,4 @@
-import type { EngineInterface as Engine, McpToolResult, Register } from 'claude-code'
+import type { EngineInterface as Engine, McpToolResult, Register, Timer } from 'claude-code'
 
 // status-dots by kevlar10x, MIT: https://github.com/kevlar10x/status-dots
 //
@@ -6,19 +6,24 @@ import type { EngineInterface as Engine, McpToolResult, Register } from 'claude-
 // sidebar shows, so the list reads like a traffic light: red when an error or
 // a refusal stopped Claude, yellow when it's your turn (a question, a plan or
 // a permission card waits for you, or the turn ended by asking you something),
-// green when it finished and needs nothing from you. While Claude works the
-// title has no dot: the app's own grey dot shows then. The desktop app gives
-// mods no way to recolor its own sidebar dot, so the title carries it. A title
-// you typed yourself is yours: the app won't let anything but an approved
-// rename change it, so that session gets no dot.
+// blue when it finished while you weren't looking, green once you've seen it
+// and it needs nothing from you. While Claude works the title has no dot: the
+// app's own grey dot shows then. The desktop app gives mods no way to recolor
+// its own sidebar dot, so the title carries it. A title you typed yourself is
+// yours: the app won't let anything but an approved rename change it, so that
+// session gets no dot.
 
-type Status = 'waiting' | 'done' | 'failed'
+type Status = 'waiting' | 'fresh' | 'done' | 'failed'
 
-// Yellow is the app's own color for a session that needs input.
-const DOTS: Record<Status, string> = { waiting: '🟡', done: '🟢', failed: '🔴' }
+// Yellow is the app's own color for a session that needs input, blue its color
+// for one with something you haven't seen.
+const DOTS: Record<Status, string> = { waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
 // ⚪ is 0.1.0's dot for a suggested next step, matched so it's replaced or cleared.
-const DOT = /^(?:⚪|🟡|🟢|🔴) /u
+const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
+const WINDOW = 'ccd_window'
+// How often a blue session checks whether you've opened it.
+const SEEN_CHECK_MS = 5000
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
@@ -36,6 +41,8 @@ let isOff = false
 let questions = 0
 // The turn's end-of-turn box asks you something.
 let isAsking = false
+// While the dot is blue: the next check for whether you've opened the session.
+let seenCheck: Timer | undefined
 
 function textOf(result: McpToolResult) {
   const block = result.content.find(one => one.type === 'text') as { text?: string } | undefined
@@ -116,6 +123,49 @@ async function clearOthers($: Engine) {
   return cleared
 }
 
+// Whether the app shows this session in a window now. A failed check counts as
+// shown, so a session the check can't reach goes green instead of staying blue.
+async function isOnScreen($: Engine) {
+  try {
+    const result = await $.mcp.call(WINDOW, 'get_window_layout', {})
+    if (result.isError) return true
+    const layout = JSON.parse(textOf(result)) as { this_session?: { on_screen?: boolean } }
+    return layout.this_session?.on_screen !== false
+  } catch {
+    return true
+  }
+}
+
+// A finished session stays blue until you've had it on screen, then turns green.
+async function showFinished($: Engine) {
+  if (await isOnScreen($)) return show($, 'done')
+  await show($, 'fresh')
+  if (wanted === 'fresh') watchUntilSeen($)
+}
+
+// Checks every few seconds while the dot is blue, and stops once it isn't.
+function watchUntilSeen($: Engine) {
+  seenCheck?.cancel()
+  seenCheck = $.clock.after(SEEN_CHECK_MS, async () => {
+    seenCheck = undefined
+    if (wanted !== 'fresh') return
+    const isSeen = await isOnScreen($)
+    // A turn may have started while the check was out.
+    if (wanted !== 'fresh') return
+    if (!isSeen) return watchUntilSeen($)
+    try {
+      await show($, 'done')
+    } catch {
+      // The store couldn't be read; the next turn sets the dot again.
+    }
+  })
+}
+
+function stopWatching() {
+  seenCheck?.cancel()
+  seenCheck = undefined
+}
+
 // Back to working (no dot) once nothing waits on you. Tool calls only return
 // inside a turn, so this needs no turn of its own to have been seen.
 async function resume($: Engine) {
@@ -128,13 +178,18 @@ export const register: Register = on => {
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
     // With the dots off, a dot left from before goes. With them on, every dot
-    // stays: a yellow one left by a closed app still means the session needs you.
-    if (isOff) {
-      try {
-        if (DOT.test((await titleOf($)) ?? '')) await show($, undefined)
-      } catch {
-        blocked = 'app'
+    // stays: a yellow one left by a closed app still means the session needs you,
+    // and a blue one turns green once you've opened the session.
+    try {
+      const title = (await titleOf($)) ?? ''
+      if (isOff && DOT.test(title)) await show($, undefined)
+      if (!isOff && title.startsWith(`${DOTS.fresh} `)) {
+        wanted = 'fresh'
+        if (await isOnScreen($)) await show($, 'done')
+        else watchUntilSeen($)
       }
+    } catch {
+      blocked = 'app'
     }
 
     return result
@@ -144,6 +199,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       questions = 0
       isAsking = false
+      stopWatching()
       // You may have handed the title back since (an approved rename by Claude).
       if (blocked === 'user') blocked = undefined
       await show($, undefined)
@@ -158,9 +214,10 @@ export const register: Register = on => {
     questions = 0
     // An answer that asks you something leaves it your turn: through the
     // end-of-turn box, or by ending its text on a question.
-    const answered = isAsking || ENDS_ASKING.test(e.answer) ? 'waiting' : 'done'
+    const isAsked = isAsking || ENDS_ASKING.test(e.answer)
+    if (e.reason === 'answer' && !isAsked) await showFinished($)
     // Stopped by you: no dot, since you were there to see it.
-    await show($, e.reason === 'answer' ? answered : e.reason === 'aborted' ? undefined : 'failed')
+    else await show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
 
     return result
   })
@@ -201,6 +258,7 @@ export const register: Register = on => {
     isOff = arg === 'off' ? true : arg === 'on' ? false : !isOff
     await $.store.set('isOff', isOff)
     if (isOff) {
+      stopWatching()
       await show($, undefined)
       if (blocked === 'app') return { text: 'Status dots are off.' }
       let cleared = 0

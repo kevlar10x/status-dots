@@ -12,6 +12,8 @@ type App = {
   source: 'auto' | 'tool' | 'user'
   renames: string[]
   others?: { sessionId: string; title: string }[]
+  // Whether the app shows this session in a window; shown unless a test says not.
+  isOffScreen?: boolean
   isMissing?: boolean
 }
 
@@ -37,6 +39,9 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (app.isMissing) throw new Error(`no MCP server named ${e.server}`)
     if (e.tool === 'get_session') return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
     if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
+    if (e.tool === 'get_window_layout') {
+      return { value: text(JSON.stringify({ this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
+    }
     const other = app.others?.find(session => session.sessionId === e.args.session_id)
     if (other) {
       other.title = String(e.args.title)
@@ -114,6 +119,53 @@ test('yellow when the answer ends on a question, green when a question sits mid-
   await begin($)
   await end($, 'answer', undefined, 'You asked why it failed? A missing import. Fixed and pushed.')
   expect(app.title).toBe('🟢 Fix the build')
+})
+
+test('blue when it finishes while you are not looking, green once you open it', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
+  const app: App = { title: 'Long build', source: 'auto', renames: [], isOffScreen: true }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Long build')
+  await clock.advance(15_000)
+  expect(app.title).toBe('🔵 Long build')
+
+  app.isOffScreen = false
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Long build')
+})
+
+test('a new turn while blue stops the check', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
+  const app: App = { title: 'Quick fix', source: 'auto', renames: [], isOffScreen: true }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Quick fix')
+  await begin($)
+  app.isOffScreen = false
+  await clock.advance(10_000)
+  expect(app.title).toBe('Quick fix')
+})
+
+test('a blue dot turns green when you open the session after a restart', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
+  const app: App = { title: '🔵 Finished overnight', source: 'tool', renames: [], isOffScreen: true }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🔵 Finished overnight')
+
+  app.isOffScreen = false
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Finished overnight')
 })
 
 test('red when an error or a refusal ends the turn', async ($, on) => {

@@ -8,10 +8,11 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 |---|---|
 | 🔴 | was stopped by an error or a refusal |
 | 🟡 | is waiting for you: a question, a plan to approve, a permission card, or a turn that ended by asking you something |
-| 🟢 | finished and needs nothing from you |
+| 🔵 | finished while you weren't looking at it, and needs nothing from you |
+| 🟢 | finished, you've seen it, and it needs nothing from you |
 | no dot | is working (the app's own grey dot shows that), or you stopped it yourself |
 
-Read it like a traffic light: red needs fixing, yellow is your turn, green is done.
+Read it like a traffic light: red needs fixing, yellow is your turn, green is done. Blue marks a finish you haven't looked at yet, and it turns green once you open the session.
 
 The app's own dot tells you a session is working, needs you or has something unread. Once you've opened a finished session, its dot goes away and the list no longer says how it ended. With several sessions running, status-dots keeps that in view.
 
@@ -50,6 +51,7 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - Once a session has a dot, the app counts its title as set and stops renaming that session on its own, for example to a pull request's title.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
 - A turn counts as asking you something when it ends with the app's next-step box, or when the last line of Claude's reply is a question. A question earlier in the reply doesn't count.
+- A session that finishes while it's on screen goes straight to green. A blue one checks every 5 seconds whether you've opened it, and only while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
 - A yellow dot stays when the app restarts. The session either asked you something or stopped while it waited on you, so it still needs you.
 - The title moves over a little when its dot comes and goes.
 
@@ -63,6 +65,8 @@ It calls the desktop app's session tools (`ccd_session_mgmt`) without Claude ask
 
 - `get_session` and `set_session_title` for the session it runs in, when the dot changes.
 - `list_sessions` and `set_session_title` for your other sessions, only when you run `/dots off`.
+
+While a session's dot is blue, it also calls `get_window_layout` from the app's window tools (`ccd_window`) every 5 seconds, to see whether the session is on screen.
 
 Those are the only tools it calls. It runs no commands or programs and fetches nothing from the network. All it sends is a session title, with the dot added or taken off, to the desktop app on your computer.
 
