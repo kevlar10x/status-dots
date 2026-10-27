@@ -184,12 +184,25 @@ async function findRecord($: Engine) {
 }
 
 // The record as last read from the file, which is read again only once it has
-// changed (a stat is far cheaper than reading and parsing it).
+// changed (a stat is far cheaper than reading and parsing it). Only the fields
+// the mod uses are kept: the whole record is a few hundred KB in memory.
 async function loadRecord($: Engine) {
   const path = await findRecord($)
   if (path === undefined) return undefined
   const { mtimeMs } = await $.fs.stat(path)
-  if (loaded?.mtimeMs !== mtimeMs) loaded = { mtimeMs, record: JSON.parse(await $.fs.read(path)) as AppRecord }
+  if (loaded?.mtimeMs !== mtimeMs) {
+    const full = JSON.parse(await $.fs.read(path)) as AppRecord
+    const record: AppRecord = {
+      lastAssistantUuid: full.lastAssistantUuid,
+      postTurnSummary: full.postTurnSummary === undefined ? undefined : true,
+      postTurnSummaryFor: full.postTurnSummaryFor,
+      turnWrapUp: full.turnWrapUp,
+      error: full.error,
+      errorCategory: full.errorCategory,
+      titleSource: full.titleSource,
+    }
+    loaded = { mtimeMs, record }
+  }
   return loaded
 }
 
@@ -244,9 +257,16 @@ function verdictOf(record: AppRecord): Verdict | undefined {
   return 'finished'
 }
 
+// Whether a 'finished' verdict leaves the dot as it is: green or blue already,
+// or yellow for a question in the next-step box. The app records that question
+// only when it stops the work, so 'finished' can't say it's gone.
+function keepsFinishedDot() {
+  return wanted === 'done' || wanted === 'fresh' || (wanted === 'waiting' && isAsking)
+}
+
 function applyVerdict($: Engine, verdict: Verdict) {
   if (verdict === 'finished') {
-    if (wanted !== 'done' && wanted !== 'fresh') void showFinished($)
+    if (!keepsFinishedDot()) void showFinished($)
     return
   }
   if (wanted === verdict) return
@@ -510,7 +530,9 @@ async function checkAtStart($: Engine, triesLeft: number) {
   const record = await readRecord($)
   const verdict = record === undefined ? undefined : verdictOf(record)
   if (hasTurned) return
-  if (verdict === 'finished' && wanted !== 'done' && wanted !== 'fresh') return showFinished($)
+  // A yellow dot with a next-step box behind it came from that box's question.
+  if (wanted === 'waiting' && record?.turnWrapUp !== undefined) isAsking = true
+  if (verdict === 'finished' && !keepsFinishedDot()) return showFinished($)
   if (verdict !== undefined) applyVerdict($, verdict)
   // A white dot with no turn behind it is left from a run that stopped mid-turn:
   // the process ended, or the app closed without picking the turn up again. A

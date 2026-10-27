@@ -624,6 +624,30 @@ test('a question in the end-of-turn box stays yellow whatever the summary says',
   expect(app.title).toBe('🟡 Release')
 })
 
+test("a question in the next-step box that doesn't stop the work stays yellow", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Perf rule', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Confirmed the rule.', ask: 'Do a performance pass now?' })
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Perf rule')
+  // The app records the box's question only when it stops the work (blocked).
+  app.record = summed('completed', 'a2', { description: 'Confirmed the rule.' })
+  await clock.advance(4_000)
+  expect(app.title).toBe('🟡 Perf rule')
+})
+
+test('a yellow dot for a next-step question stays when the session starts again', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟡 Perf rule', source: 'tool', renames: [], record: summed('completed', 'a2', { description: 'Confirmed the rule.' }) }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🟡 Perf rule')
+})
+
 test('the verdict waits for the summary of the latest reply', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Refactor', source: 'auto', renames: [] }

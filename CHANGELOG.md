@@ -2,6 +2,12 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.6.3 - 2026-10-27
+
+- A question in the next-step box keeps the dot yellow again. The app records that question only when it stops the work, so a question with buttons that didn't stop it was read as finished a few seconds later, and the dot went blue or green while the question was still there.
+- That yellow dot also stays when the session starts again.
+- Uses about 220 KB less memory per session: it keeps only the few fields it reads from the app's record of the session, not the whole record.
+
 ## 0.6.2 - 2026-10-27
 
 - Sessions you named yourself no longer fill up with "Allow Claude to rename this session?" cards. The desktop app now holds a rename of a title you typed for your approval, where it used to refuse it, and approving can't work for a mod's rename, so every dot change and retry left another card. The mod now checks the app's record and never renames those sessions.
