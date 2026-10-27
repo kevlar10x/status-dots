@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.3.1 - 2026-10-27
+
+- Fixed: a session whose process had just started could go without dots until it restarted, because the app's tools weren't connected yet when the mod first looked at the title. A failed call now skips only that one change, and the check at start tries again for up to 30 seconds.
+
 ## 0.3.0 - 2026-10-27
 
 - A session that finishes while you aren't looking at it now gets a blue dot. It turns green once you open the session, so the list shows which finishes you haven't seen yet.

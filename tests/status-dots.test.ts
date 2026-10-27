@@ -15,6 +15,8 @@ type App = {
   // Whether the app shows this session in a window; shown unless a test says not.
   isOffScreen?: boolean
   isMissing?: boolean
+  // The app's tools aren't connected yet, as in a process that has just started.
+  isConnecting?: boolean
 }
 
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], isError })
@@ -36,7 +38,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     return { result: 'ok' }
   })
   on('mcp.call', (_, e) => {
-    if (app.isMissing) throw new Error(`no MCP server named ${e.server}`)
+    if (app.isMissing || app.isConnecting) throw new Error(`no MCP server named ${e.server}`)
     if (e.tool === 'get_session') return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
     if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
     if (e.tool === 'get_window_layout') {
@@ -349,6 +351,31 @@ test('/dots off also takes the dot off other sessions, and leaves titles without
   expect(off.text).toBe('Status dots are off. Also took the dot off 2 other sessions.')
   expect(app.title).toBe('This one')
   expect(others.map(session => session.title)).toEqual(['Other done', 'Other failed', 'No dot here'])
+})
+
+test("dots still work when the app's tools connect after the session starts", async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
+  const app: App = { title: 'Fresh process', source: 'tool', renames: [], isConnecting: true }
+  engine(on, app)
+  await start($)
+  app.isConnecting = false
+  await clock.advance(10_000)
+
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fresh process')
+})
+
+test('a blue dot left from before is still checked when the tools connect late', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
+  const app: App = { title: '🔵 Seen later', source: 'tool', renames: [], isConnecting: true }
+  engine(on, app)
+  await start($)
+  app.isConnecting = false
+  await clock.advance(10_000)
+  expect(app.title).toBe('🟢 Seen later')
 })
 
 test('outside the desktop app it does nothing and breaks nothing', async ($, on) => {

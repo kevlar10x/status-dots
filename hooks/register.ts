@@ -24,6 +24,9 @@ const SESSIONS = 'ccd_session_mgmt'
 const WINDOW = 'ccd_window'
 // How often a blue session checks whether you've opened it.
 const SEEN_CHECK_MS = 5000
+// How often, and how many times, a starting session retries reaching the app.
+const START_RETRY_MS = 5000
+const START_TRIES = 6
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
@@ -34,15 +37,16 @@ const ENDS_ASKING = /\?["'”’)\]*_`]*\s*$/u
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
 let isWriting = false
-// 'user': the title is one you set, which the app keeps. 'app': the desktop
-// app's session tools aren't here (a terminal session).
-let blocked: 'user' | 'app' | undefined
+// The title is one you set, which the app keeps.
+let isUserTitle = false
 let isOff = false
 let questions = 0
 // The turn's end-of-turn box asks you something.
 let isAsking = false
 // While the dot is blue: the next check for whether you've opened the session.
 let seenCheck: Timer | undefined
+// A turn has started in this process, so the start check has nothing left to do.
+let hasTurned = false
 
 function textOf(result: McpToolResult) {
   const block = result.content.find(one => one.type === 'text') as { text?: string } | undefined
@@ -59,7 +63,7 @@ async function titleOf($: Engine) {
 // Writes the wanted dot into the title, one write at a time. A change asked for
 // while a write is out is picked up when that write returns.
 async function paint($: Engine) {
-  if (isWriting || blocked !== undefined) return
+  if (isWriting || isUserTitle) return
   isWriting = true
   try {
     let status: Status | undefined
@@ -76,7 +80,7 @@ async function paint($: Engine) {
         const result = await $.mcp.call(SESSIONS, 'set_session_title', { session_id: 'self', title: next })
         if (result.isError) {
           if (/set by the user/.test(textOf(result))) {
-            blocked = 'user'
+            isUserTitle = true
             await explainOnce($)
           }
           return
@@ -84,7 +88,9 @@ async function paint($: Engine) {
       }
     } while (status !== wanted)
   } catch {
-    blocked = 'app'
+    // The app's tools aren't reachable: not connected yet in a process that has
+    // just started, or not there at all outside the desktop app. Only this
+    // write is skipped; the next change tries again.
   } finally {
     isWriting = false
   }
@@ -166,6 +172,29 @@ function stopWatching() {
   seenCheck = undefined
 }
 
+// What a session finds when it starts. With the dots off, a dot left from
+// before goes. With them on, every dot stays: a yellow one left by a closed app
+// still means the session needs you, and a blue one turns green once you've
+// opened the session. In a process that has just started the app's tools may
+// not be connected yet, so the check tries again a few times, until a turn
+// starts and takes over.
+async function checkAtStart($: Engine, triesLeft: number) {
+  if (hasTurned) return
+  let title: string
+  try {
+    title = (await titleOf($)) ?? ''
+  } catch {
+    if (triesLeft > 0) $.clock.after(START_RETRY_MS, () => void checkAtStart($, triesLeft - 1).catch(() => undefined))
+    return
+  }
+  if (isOff && DOT.test(title)) await show($, undefined)
+  if (!isOff && title.startsWith(`${DOTS.fresh} `)) {
+    wanted = 'fresh'
+    if (await isOnScreen($)) await show($, 'done')
+    else watchUntilSeen($)
+  }
+}
+
 // Back to working (no dot) once nothing waits on you. Tool calls only return
 // inside a turn, so this needs no turn of its own to have been seen.
 async function resume($: Engine) {
@@ -177,20 +206,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots on or off' })
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
-    // With the dots off, a dot left from before goes. With them on, every dot
-    // stays: a yellow one left by a closed app still means the session needs you,
-    // and a blue one turns green once you've opened the session.
-    try {
-      const title = (await titleOf($)) ?? ''
-      if (isOff && DOT.test(title)) await show($, undefined)
-      if (!isOff && title.startsWith(`${DOTS.fresh} `)) {
-        wanted = 'fresh'
-        if (await isOnScreen($)) await show($, 'done')
-        else watchUntilSeen($)
-      }
-    } catch {
-      blocked = 'app'
-    }
+    await checkAtStart($, START_TRIES)
 
     return result
   })
@@ -200,8 +216,9 @@ export const register: Register = on => {
       questions = 0
       isAsking = false
       stopWatching()
+      hasTurned = true
       // You may have handed the title back since (an approved rename by Claude).
-      if (blocked === 'user') blocked = undefined
+      isUserTitle = false
       await show($, undefined)
     }
 
@@ -260,7 +277,6 @@ export const register: Register = on => {
     if (isOff) {
       stopWatching()
       await show($, undefined)
-      if (blocked === 'app') return { text: 'Status dots are off.' }
       let cleared = 0
       try {
         cleared = await clearOthers($)
@@ -270,8 +286,6 @@ export const register: Register = on => {
       const others = cleared === 1 ? '1 other session' : `${cleared} other sessions`
       return { text: cleared === 0 ? 'Status dots are off.' : `Status dots are off. Also took the dot off ${others}.` }
     }
-    if (blocked === 'app') return { text: 'Status dots are on, but they only show in the Claude desktop app.' }
-
-    return { text: 'Status dots are on. This session gets its dot the next time Claude finishes here.' }
+    return { text: 'Status dots are on. In the Claude desktop app, this session gets its dot the next time Claude finishes here.' }
   })
 }
