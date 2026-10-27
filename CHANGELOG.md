@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## Unreleased
+
+- The README has a screenshot of the sidebar with the dots.
+
 ## 0.2.1 - 2026-10-27
 
 - The mod no longer hooks permission checks, so it never takes part in a permission decision. Permission prompts still turn the dot yellow through Claude Code's notification event.
