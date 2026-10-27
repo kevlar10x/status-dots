@@ -2,8 +2,10 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
-## Unreleased
+## 0.6.1 - 2026-10-27
 
+- `/dots off` run in one session now keeps the dots off in the others. Before, a session that was waiting for you to open it, or was writing its dot at that moment, could put its dot back.
+- If a session was renamed while its dot was being written and the dot was meant to come off, the dot could stay. It comes off now.
 - The README's screenshot now shows green and yellow dots, not only green.
 
 ## 0.6.0 - 2026-10-27

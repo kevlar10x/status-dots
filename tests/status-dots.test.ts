@@ -30,6 +30,29 @@ type App = {
   // How many times the mod read the record file, and asked if the app shows the session.
   fileReads?: number
   layoutChecks?: number
+  // While set, the app's answer to where the session shows, or to a rename of
+  // it, waits for this, as a slow app would.
+  layoutHold?: Promise<void>
+  renameHold?: Promise<void>
+}
+
+// A store the test can write to as another session would.
+function sharedStore(on: On, entries: Record<string, unknown> = {}) {
+  on('store.get', (_, e) => ({ value: entries[e.key] }))
+  on('store.set', (_, e) => {
+    entries[e.key] = e.value
+    return { value: undefined }
+  })
+  return entries
+}
+
+// A promise that resolves when the test says so.
+function gate() {
+  let open = () => {}
+  const held = new Promise<void>(resolve => {
+    open = resolve
+  })
+  return { held, open }
 }
 
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], isError })
@@ -95,7 +118,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     seen.push(app.title ?? '')
     return { result: 'ok' }
   })
-  on('mcp.call', (_, e) => {
+  on('mcp.call', async (_, e) => {
     app.calls = (app.calls ?? 0) + 1
     if (app.isMissing || app.isConnecting) throw new Error(`no MCP server named ${e.server}`)
     if (e.tool === 'get_session') {
@@ -105,6 +128,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
     if (e.tool === 'get_window_layout') {
       app.layoutChecks = (app.layoutChecks ?? 0) + 1
+      await app.layoutHold
       return { value: text(JSON.stringify({ this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
     }
     const other = app.others?.find(session => session.sessionId === e.args.session_id)
@@ -113,6 +137,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       return { value: text(`Renamed session ${other.sessionId}.`) }
     }
     if (app.isStuck) return new Promise<never>(() => undefined)
+    await app.renameHold
     const title = String(e.args.title)
     if (app.source === 'user' && title !== app.title) return { value: text(USER_TITLE_REFUSAL, true) }
     const was = app.title
@@ -265,6 +290,7 @@ test('red when an error or a refusal ends the turn', async ($, on) => {
     reason: 'refusal',
     refusal: { category: null, explanation: null },
   })
+  await current.settle()
   expect(app.title).toBe('🔴 Port the parser')
 })
 
@@ -427,6 +453,61 @@ test('/dots off also takes the dot off other sessions, and leaves titles without
   expect(off.text).toBe('Status dots are off. Also took the dot off 2 other sessions.')
   expect(app.title).toBe('This one')
   expect(others.map(session => session.title)).toEqual(['Other done', 'Other failed', 'No dot here'])
+})
+
+test('/dots off while a finished turn is still being checked leaves no dot', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Slow check', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+  await begin($)
+
+  // The turn ends; the check of whether the session is on screen is still out.
+  const layout = gate()
+  app.layoutHold = layout.held
+  await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' })
+  await flush()
+  await $.command.run({ command: 'dots', args: 'off', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  layout.open()
+  await current.settle()
+  expect(app.title).toBe('Slow check')
+})
+
+test('dots turned off in another session stay off when this one finishes being looked at', async ($, on) => {
+  const saved = sharedStore(on)
+  const app: App = { title: 'Long build', source: 'auto', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Long build')
+
+  // /dots off in another session saves the setting and takes this dot off.
+  saved.isOff = true
+  app.title = 'Long build'
+  app.isOffScreen = false
+  await clock.advance(5_000)
+  expect(app.title).toBe('Long build')
+})
+
+test('a dot written just as another session turns the dots off is taken back off', async ($, on) => {
+  const saved = sharedStore(on)
+  const app: App = { title: 'Race', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+  await begin($)
+
+  // The green dot's write is out when the other session turns the dots off.
+  const rename = gate()
+  app.renameHold = rename.held
+  await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' })
+  await flush()
+  saved.isOff = true
+  app.title = 'Race'
+  app.renameHold = undefined
+  rename.open()
+  await current.settle()
+  expect(app.title).toBe('Race')
 })
 
 test("dots still work when the app's tools connect after the session starts", async ($, on) => {

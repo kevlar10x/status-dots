@@ -229,6 +229,24 @@ function stopFollowing() {
   verdictCheck = undefined
 }
 
+// Whether the dots are off, in this session or another one since it last
+// looked. Another session's /dots off has already taken this dot away, so
+// this one drops its dot and its checks rather than bring it back.
+async function isTurnedOff($: Engine) {
+  if (!isOff) {
+    try {
+      isOff = (await $.store.get('isOff')) === true
+    } catch {
+      return false
+    }
+  }
+  if (!isOff) return false
+  wanted = undefined
+  stopWatching()
+  stopFollowing()
+  return true
+}
+
 // Writes the wanted dot into the title, one write at a time. A change asked for
 // while a write is out is picked up when that write returns. Never throws.
 async function paint($: Engine) {
@@ -238,11 +256,14 @@ async function paint($: Engine) {
   try {
     let status: Status | undefined
     let written: string | undefined
+    // A rename that came in while a write was out: the name the dot goes onto.
+    let renamed: string | undefined
     let isRenamed = false
     let redos = 0
     do {
       status = wanted
       isRenamed = false
+      if (status !== undefined && (await isTurnedOff($))) status = wanted
       const title = knownTitle ?? (await titleOf($))
       if (title === undefined) return
       // No title yet. The app names a new session from its first prompt, and a
@@ -251,7 +272,8 @@ async function paint($: Engine) {
         knownTitle = undefined
         return
       }
-      const next = dotted(title, status)
+      const next = dotted(renamed ?? title, status)
+      renamed = undefined
       if (next === title) continue
       const result = await call($, SESSIONS, 'set_session_title', { session_id: 'self', title: next })
       if (result.isError) {
@@ -273,11 +295,14 @@ async function paint($: Engine) {
         // read the title again before the next write rather than trust the cache.
         knownTitle = undefined
       } else if (replaced !== title && replaced !== written && redos < 1) {
-        knownTitle = replaced
+        renamed = replaced
         isRenamed = true
         redos += 1
       }
       written = next
+      // Looked at again once the write is in: dots turned off while it was out
+      // take this one straight back off.
+      if (status !== undefined) await isTurnedOff($)
     } while (isRenamed || status !== wanted)
   } catch {
     // The app's tools aren't reachable: not connected yet in a process that has
