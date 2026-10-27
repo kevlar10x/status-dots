@@ -4,8 +4,8 @@ import type { EngineInterface as Engine, McpToolResult, Register, Timer } from '
 //
 // Puts a colored dot in front of this session's title, which the Code tab's
 // sidebar shows, so the list reads like a traffic light: red when an error or
-// a refusal stopped Claude, yellow when it's your turn (a question, a plan or
-// a permission card waits for you, or the turn ended by asking you something),
+// a refusal stopped Claude, yellow when something on screen waits for you (a
+// question, a plan or a permission card, or a question in the next-step box),
 // blue when it finished while you weren't looking, green once you've seen it
 // and it needs nothing from you. While Claude works the title has no dot: the
 // app's own grey dot shows then. The desktop app gives mods no way to recolor
@@ -37,8 +37,6 @@ const CALL_TIMEOUT_MS = 10000
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
-// Text whose last line is a question, past any closing markdown or quotes.
-const ENDS_ASKING = /\?["'”’)\]*_`]*\s*$/u
 
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
@@ -61,14 +59,17 @@ let sessionId: string | undefined
 let recordPath: string | undefined
 let recordSearches = 0
 
-// What the app keeps about this session in its data folder, the fields its own
-// sidebar reads for a finished turn. The file is the app's and private, so
-// anything unexpected in it only means no verdict, and the mod's own checks stand.
+// What the app keeps about this session in its data folder: whether the last
+// turn's next-step box asked you something, and whether an error ended it. The
+// file is the app's and private, so anything unexpected in it only means no
+// verdict, and the mod's own checks stand.
 type AppRecord = {
   lastAssistantUuid?: string
-  postTurnSummary?: { status_category?: string }
+  postTurnSummary?: unknown
   postTurnSummaryFor?: string
   turnWrapUp?: { needsUser?: string }
+  error?: unknown
+  errorCategory?: unknown
 }
 type Verdict = 'waiting' | 'failed' | 'finished'
 
@@ -134,18 +135,17 @@ async function readRecord($: Engine) {
   }
 }
 
-// The app's verdict on the last turn, as its sidebar reads it: the end-of-turn
-// box asking you something, or a summary that says Claude is blocked on you or
-// needs your input, is your turn; a failed turn is red; anything else is a
-// finish. Undefined until the app has summed up the latest reply.
+// How the last turn ended, from what the app recorded, once its record has
+// caught up with the latest reply (it sums every turn up, and the summary
+// arriving is the sign). Only what's really on screen counts: a question in the
+// next-step box is your turn and an error is red. The summary's own reading of
+// the reply, that Claude seems blocked on you, say, is a guess the mod ignores,
+// since nothing in the session waits for you then.
 function verdictOf(record: AppRecord): Verdict | undefined {
-  const summary = record.postTurnSummary
-  if (summary === undefined || record.lastAssistantUuid === undefined) return undefined
+  if (record.postTurnSummary === undefined || record.lastAssistantUuid === undefined) return undefined
   if (record.postTurnSummaryFor !== record.lastAssistantUuid) return undefined
-  const category = summary.status_category
-  if (category === 'failed') return 'failed'
+  if (record.error !== undefined || record.errorCategory !== undefined) return 'failed'
   if (record.turnWrapUp?.needsUser) return 'waiting'
-  if ((category === 'blocked' || category === 'need_input') && record.turnWrapUp === undefined) return 'waiting'
   return 'finished'
 }
 
@@ -359,10 +359,9 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
     questions = 0
-    // An answer that asks you something leaves it your turn: through the
-    // end-of-turn box, or by ending its text on a question.
-    const isAsked = isAsking || ENDS_ASKING.test(e.answer)
-    if (e.reason === 'answer' && !isAsked) await showFinished($)
+    // An answer whose next-step box asks you something leaves it your turn. A
+    // question only in the reply's text doesn't: nothing on screen waits for you.
+    if (e.reason === 'answer' && !isAsking) await showFinished($)
     // Stopped by you: no dot, since you were there to see it.
     else await show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
     if (e.reason === 'answer') followVerdict($)

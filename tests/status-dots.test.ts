@@ -131,7 +131,7 @@ test('yellow when the turn ends by asking you something', async ($, on) => {
   expect(app.title).toBe('🟢 Ship the release')
 })
 
-test('yellow when the answer ends on a question, green when a question sits mid-text', async ($, on) => {
+test("a question only in the reply's text stays green: nothing on screen waits for you", async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Fix the build', source: 'auto', renames: [] }
   engine(on, app)
@@ -139,14 +139,6 @@ test('yellow when the answer ends on a question, green when a question sits mid-
 
   await begin($)
   await end($, 'answer', undefined, 'The build passes now.\n\nWant me to push it?')
-  expect(app.title).toBe('🟡 Fix the build')
-
-  await begin($)
-  await end($, 'answer', undefined, 'Pushed it.\n\n**Should I tag a release?**')
-  expect(app.title).toBe('🟡 Fix the build')
-
-  await begin($)
-  await end($, 'answer', undefined, 'You asked why it failed? A missing import. Fixed and pushed.')
   expect(app.title).toBe('🟢 Fix the build')
 })
 
@@ -400,7 +392,10 @@ test('a blue dot left from before is still checked when the tools connect late',
   expect(app.title).toBe('🟢 Seen later')
 })
 
-// The app's record once it has summed up the reply \`uuid\`.
+// A next-step box that asks you something, as the app records it.
+const ASKED = { description: 'Done.', needsUser: 'Pick one?' }
+
+// The app's record once it has summed up the reply `uuid`.
 const summed = (category: string, uuid = 'a2', wrapUp?: Record<string, unknown>) => ({
   lastAssistantUuid: uuid,
   postTurnSummaryFor: uuid,
@@ -408,7 +403,7 @@ const summed = (category: string, uuid = 'a2', wrapUp?: Record<string, unknown>)
   ...(wrapUp ? { turnWrapUp: wrapUp } : {}),
 })
 
-test("yellow when the app says Claude is blocked on you, though the reply asks nothing", async ($, on) => {
+test("the summary's guess that Claude is blocked on you doesn't make it yellow", async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Ship the build', source: 'auto', renames: [] }
   const clock = engine(on, app)
@@ -416,13 +411,12 @@ test("yellow when the app says Claude is blocked on you, though the reply asks n
 
   await begin($)
   await end($, 'answer', undefined, 'The build is ready. You need to sign the installer before I can upload it.')
-  expect(app.title).toBe('🟢 Ship the build')
   app.record = summed('blocked')
   await clock.advance(2_000)
-  expect(app.title).toBe('🟡 Ship the build')
+  expect(app.title).toBe('🟢 Ship the build')
 })
 
-test('red when the app says the turn failed', async ($, on) => {
+test('red when the app recorded an error for the turn, not for a summary that says it failed', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Deploy', source: 'auto', renames: [], record: summed('failed') }
   const clock = engine(on, app)
@@ -431,21 +425,27 @@ test('red when the app says the turn failed', async ($, on) => {
   await begin($)
   await end($, 'answer', undefined, 'The deploy did not go through.')
   await clock.advance(2_000)
+  expect(app.title).toBe('🟢 Deploy')
+
+  await begin($)
+  app.record = { ...summed('completed', 'a3'), errorCategory: 'api_error' }
+  await end($, 'answer')
+  await clock.advance(2_000)
   expect(app.title).toBe('🔴 Deploy')
 })
 
-test("the app's verdict wins over a guess from a closing question", async ($, on) => {
+test("a next-step question the mod didn't see is put back from the app's record", async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Tidy imports', source: 'auto', renames: [] }
   const clock = engine(on, app)
   await start($)
 
   await begin($)
-  await end($, 'answer', undefined, 'Done. Anything else?')
-  expect(app.title).toBe('🟡 Tidy imports')
-  app.record = summed('completed')
-  await clock.advance(2_000)
+  await end($, 'answer')
   expect(app.title).toBe('🟢 Tidy imports')
+  app.record = summed('completed', 'a2', ASKED)
+  await clock.advance(2_000)
+  expect(app.title).toBe('🟡 Tidy imports')
 })
 
 test('a question in the end-of-turn box stays yellow whatever the summary says', async ($, on) => {
@@ -471,10 +471,10 @@ test('the verdict waits for the summary of the latest reply', async ($, on) => {
   await begin($)
   await end($, 'answer')
   // Still the summary of an earlier reply.
-  app.record = { ...summed('blocked', 'a1'), lastAssistantUuid: 'a2' }
+  app.record = { ...summed('completed', 'a1', ASKED), lastAssistantUuid: 'a2' }
   await clock.advance(4_000)
   expect(app.title).toBe('🟢 Refactor')
-  app.record = summed('blocked', 'a2')
+  app.record = summed('completed', 'a2', ASKED)
   await clock.advance(2_000)
   expect(app.title).toBe('🟡 Refactor')
 })
@@ -488,17 +488,25 @@ test('a new turn stops the verdict check of the one before', async ($, on) => {
   await begin($)
   await end($, 'answer')
   await begin($)
-  app.record = summed('blocked')
+  app.record = summed('completed', 'a2', ASKED)
   await clock.advance(10_000)
   expect(app.title).toBe('Quick turns')
 })
 
 test('a turn whose end was missed gets its dot when the session starts again', async ($, on) => {
   mock.store(on)
-  const app: App = { title: 'Missed end', source: 'tool', renames: [], record: summed('blocked') }
+  const app: App = { title: 'Missed end', source: 'tool', renames: [], record: summed('completed', 'a2', ASKED) }
   engine(on, app)
   await start($)
   expect(app.title).toBe('🟡 Missed end')
+})
+
+test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟡 btt', source: 'tool', renames: [], record: summed('blocked') }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🟢 btt')
 })
 
 test('a missed finish comes back blue when you are not looking, and a seen green stays green', async ($, on) => {

@@ -7,7 +7,7 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 | Dot | The session |
 |---|---|
 | 🔴 | was stopped by an error or a refusal |
-| 🟡 | is waiting for you: a question, a plan to approve, a permission card, or a turn that ended by asking you something |
+| 🟡 | is waiting for you on screen: a question, a plan to approve, a permission card, or a question in the app's next-step box |
 | 🔵 | finished while you weren't looking at it, and needs nothing from you |
 | 🟢 | finished, you've seen it, and it needs nothing from you |
 | no dot | is working (the app's own grey dot shows that), or you stopped it yourself |
@@ -50,14 +50,15 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - A new session gets its first dot when Claude finishes its first turn. The mod leaves a title alone until the app has named the session, so the app's naming still works.
 - Once a session has a dot, the app counts its title as set and stops renaming that session on its own, for example to a pull request's title.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
-- When a turn ends, the dot first comes from what the mod saw: a question in the app's next-step box, or a reply whose last line is a question, means yellow. A few seconds later the app sums up the turn for its own sidebar, and the dot follows that summary: yellow when Claude is blocked on you or needs your input, even if the reply asks nothing outright, red when the turn failed, and green or blue otherwise.
+- Yellow means something in the session is waiting for you on screen. A reply that only asks in its text, or that the app's own summary reads as waiting on you, stays green or blue, since there's nothing there to answer.
+- A few seconds after a turn ends, the mod checks the app's record of it. That puts back a question in the next-step box, or an error, that the mod missed when the turn ended.
 - A session that finishes while it's on screen goes straight to green. A blue one checks every 5 seconds whether you've opened it, and only while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
-- When a session starts again, its dot is matched to the app's summary of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
+- When a session starts again, its dot is matched to the app's record of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
 - The title moves over a little when its dot comes and goes.
 
 ## Privacy
 
-The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. At the end of each turn it checks whether Claude's reply ends on a question, and keeps nothing of it. To follow the app's summary of each turn, it reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`), and uses only the fields that say how the turn ended. It reads no other session's file and keeps nothing from it. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
+The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. To check how each turn ended, it reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`), and uses only two things from it: whether the next-step box asked you something, and whether an error ended the turn. It reads no other session's file and keeps nothing from it. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
 
 ## What it calls and hooks
 
@@ -76,7 +77,7 @@ Those are the only tools it calls. It runs no commands or programs and fetches n
 
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. It reads Claude's final reply only to see whether its last line is a question. Subagents' turns are skipped.
+- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. Subagents' turns are skipped.
 - `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
 - `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's summary of the last turn.
@@ -86,7 +87,7 @@ It has no hook on permission checks, so it never takes part in a permission deci
 ## Limits
 
 - Tested on Windows only.
-- The app's summary comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
+- The app's record comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
 - Yellow for questions has been seen working in the desktop app. Yellow for permission cards depends on Claude Code's notification event and hasn't been seen live yet. The app's own dot turns yellow for those either way.
 
 ## Uninstall

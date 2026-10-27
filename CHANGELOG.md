@@ -6,6 +6,12 @@ Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
 - The README's screenshot now shows green and yellow dots, not only green.
 
+## 0.4.1 - 2026-10-27
+
+- Yellow now means something in the session is waiting for you on screen: a question card, a plan to approve, a permission prompt, or a question in the app's next-step box. A reply that only asks in its text, or that the app's summary reads as waiting on you, no longer turns yellow.
+- Red comes only from an error that ended the turn, not from the app's summary saying the work went wrong.
+- A yellow dot that 0.4.0 set from the summary's guess goes back to green or blue the next time that session starts.
+
 ## 0.4.0 - 2026-10-27
 
 - Better status detection: a few seconds after a turn ends, the dot follows the app's own summary of that turn, the one its sidebar uses. A reply that leaves you something to do now gets yellow even when it doesn't end on a question, and a turn the app counts as failed gets red.
