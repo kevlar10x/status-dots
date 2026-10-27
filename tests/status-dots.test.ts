@@ -99,18 +99,18 @@ const end = ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string
 const dots = ($: Engine, args: string) =>
   $.command.run({ command: 'dots', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
 
-test('no dot while working (the app shows its grey one), green when the turn ends with an answer', async ($, on) => {
+test('white while working, green when the turn ends with an answer', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
   engine(on, app)
   await start($)
 
   await begin($)
-  expect(app.title).toBe('Fix the login bug')
+  expect(app.title).toBe('⚪ Fix the login bug')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Fix the login bug')
   await begin($)
-  expect(app.title).toBe('Fix the login bug')
+  expect(app.title).toBe('⚪ Fix the login bug')
 })
 
 test('yellow when the turn ends by asking you something', async ($, on) => {
@@ -171,7 +171,7 @@ test('a new turn while blue stops the check', async ($, on) => {
   await begin($)
   app.isOffScreen = false
   await clock.advance(10_000)
-  expect(app.title).toBe('Quick fix')
+  expect(app.title).toBe('⚪ Quick fix')
 })
 
 test('a blue dot turns green when you open the session after a restart', async ($, on) => {
@@ -219,7 +219,7 @@ test('a turn you stop leaves no dot', async ($, on) => {
   expect(app.title).toBe('Tidy the docs')
 })
 
-test('yellow while a permission card is up, back to no dot once the call returns', async ($, on) => {
+test('yellow while a permission card is up, back to white once the call returns', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Clean the build', source: 'auto', renames: [] }
   engine(on, app)
@@ -229,7 +229,7 @@ test('yellow while a permission card is up, back to no dot once the call returns
   await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
   expect(app.title).toBe('🟡 Clean the build')
   await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
-  expect(app.title).toBe('Clean the build')
+  expect(app.title).toBe('⚪ Clean the build')
 })
 
 test('yellow while a question waits for your answer', async ($, on) => {
@@ -242,7 +242,7 @@ test('yellow while a question waits for your answer', async ($, on) => {
   await begin($)
   await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
   expect(seen).toEqual(['🟡 Pick a palette'])
-  expect(app.title).toBe('Pick a palette')
+  expect(app.title).toBe('⚪ Pick a palette')
 })
 
 test('an answered question clears its yellow dot even when the mod loaded mid-turn', async ($, on) => {
@@ -252,8 +252,8 @@ test('an answered question clears its yellow dot even when the mod loaded mid-tu
   await start($)
 
   await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
-  expect(app.title).toBe('Loaded late')
-  expect(app.renames).toEqual(['🟡 Loaded late', 'Loaded late'])
+  expect(app.title).toBe('⚪ Loaded late')
+  expect(app.renames).toEqual(['🟡 Loaded late', '⚪ Loaded late'])
 })
 
 test("a subagent's turns leave the session's dot alone", async ($, on) => {
@@ -265,7 +265,7 @@ test("a subagent's turns leave the session's dot alone", async ($, on) => {
   await begin($)
   await begin($, 'agent-1')
   await end($, 'answer', 'agent-1')
-  expect(app.title).toBe('Review the PR')
+  expect(app.title).toBe('⚪ Review the PR')
 })
 
 test('a title you set yourself is left alone, and why is said once ever', async ($, on) => {
@@ -308,14 +308,14 @@ test('a yellow dot stays when the session starts again, since it still needs you
   expect(app.renames).toEqual([])
 })
 
-test("0.1.0's white dot is replaced at the next change", async ($, on) => {
+test("0.1.0's white dot now reads as working and gives way when the turn ends", async ($, on) => {
   mock.store(on)
   const app: App = { title: '⚪ Old suggestion', source: 'tool', renames: [] }
   engine(on, app)
   await start($)
 
   await begin($)
-  expect(app.title).toBe('Old suggestion')
+  expect(app.title).toBe('⚪ Old suggestion')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Old suggestion')
 })
@@ -490,7 +490,7 @@ test('a new turn stops the verdict check of the one before', async ($, on) => {
   await begin($)
   app.record = summed('completed', 'a2', ASKED)
   await clock.advance(10_000)
-  expect(app.title).toBe('Quick turns')
+  expect(app.title).toBe('⚪ Quick turns')
 })
 
 test('a turn whose end was missed gets its dot when the session starts again', async ($, on) => {

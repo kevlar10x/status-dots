@@ -7,18 +7,17 @@ import type { EngineInterface as Engine, McpToolResult, Register, Timer } from '
 // a refusal stopped Claude, yellow when something on screen waits for you (a
 // question, a plan or a permission card, or a question in the next-step box),
 // blue when it finished while you weren't looking, green once you've seen it
-// and it needs nothing from you. While Claude works the title has no dot: the
-// app's own grey dot shows then. The desktop app gives mods no way to recolor
+// and it needs nothing from you, white while Claude works. The desktop app gives mods no way to recolor
 // its own sidebar dot, so the title carries it. A title you typed yourself is
 // yours: the app won't let anything but an approved rename change it, so that
 // session gets no dot.
 
-type Status = 'waiting' | 'fresh' | 'done' | 'failed'
+type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 
 // Yellow is the app's own color for a session that needs input, blue its color
-// for one with something you haven't seen.
-const DOTS: Record<Status, string> = { waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
-// ⚪ is 0.1.0's dot for a suggested next step, matched so it's replaced or cleared.
+// for one with something you haven't seen. White is the nearest emoji to the
+// app's grey working dot.
+const DOTS: Record<Status, string> = { working: '⚪', waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
 const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
 const WINDOW = 'ccd_window'
@@ -323,10 +322,10 @@ async function checkAtStart($: Engine, triesLeft: number) {
   else watchUntilSeen($)
 }
 
-// Back to working (no dot) once nothing waits on you. Tool calls only return
-// inside a turn, so this needs no turn of its own to have been seen.
+// Back to working once nothing waits on you. Tool calls only return inside a
+// turn, so this needs no turn of its own to have been seen.
 async function resume($: Engine) {
-  if (questions === 0 && wanted === 'waiting') await show($, undefined)
+  if (questions === 0 && wanted === 'waiting') await show($, 'working')
 }
 
 export const register: Register = on => {
@@ -349,7 +348,7 @@ export const register: Register = on => {
       turnCount += 1
       // You may have handed the title back since (an approved rename by Claude).
       isUserTitle = false
-      await show($, undefined)
+      await show($, 'working')
     }
 
     return next(e)

@@ -10,9 +10,10 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 | 🟡 | is waiting for you on screen: a question, a plan to approve, a permission card, or a question in the app's next-step box |
 | 🔵 | finished while you weren't looking at it, and needs nothing from you |
 | 🟢 | finished, you've seen it, and it needs nothing from you |
-| no dot | is working (the app's own grey dot shows that), or you stopped it yourself |
+| ⚪ | is working |
+| no dot | was stopped by you, or hasn't finished a turn since it was named |
 
-Read it like a traffic light: red needs fixing, yellow is your turn, green is done. Blue marks a finish you haven't looked at yet, and it turns green once you open the session.
+Read it like a traffic light: red needs fixing, yellow is your turn, green is done. White means Claude is still at it. Blue marks a finish you haven't looked at yet, and it turns green once you open the session.
 
 The app's own dot tells you a session is working, needs you or has something unread. Once you've opened a finished session, its dot goes away and the list no longer says how it ended. With several sessions running, status-dots keeps that in view.
 
@@ -77,7 +78,7 @@ Those are the only tools it calls. It runs no commands or programs and fetches n
 
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. Subagents' turns are skipped.
+- `turn.start` and `turn.complete`: the dot turns white while Claude works, then green, blue, yellow or red when the turn ends. Subagents' turns are skipped.
 - `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
 - `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's summary of the last turn.

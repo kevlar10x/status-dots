@@ -6,6 +6,11 @@ Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
 - The README's screenshot now shows green and yellow dots, not only green.
 
+## 0.5.0 - 2026-10-27
+
+- A session that's working now shows a white dot, so every session in the list has one. Before, a working session had no dot and only the app's own grey dot on the right showed it.
+- After you answer a question card, the dot goes back to white while Claude carries on.
+
 ## 0.4.1 - 2026-10-27
 
 - Yellow now means something in the session is waiting for you on screen: a question card, a plan to approve, a permission prompt, or a question in the app's next-step box. A reply that only asks in its text, or that the app's summary reads as waiting on you, no longer turns yellow.
