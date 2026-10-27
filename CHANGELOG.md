@@ -2,8 +2,11 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
-## Unreleased
+## 0.4.0 - 2026-10-27
 
+- Better status detection: a few seconds after a turn ends, the dot follows the app's own summary of that turn, the one its sidebar uses. A reply that leaves you something to do now gets yellow even when it doesn't end on a question, and a turn the app counts as failed gets red.
+- A session whose end-of-turn dot was missed gets it when the session starts again.
+- A call to the app that doesn't answer now gives up after 10 seconds, so one stuck call can't stop the dots in that session.
 - The README's list of hooked events is whole again. The `session.start` line had slipped below the note that follows it.
 - The README links the other kevlar10x mods.
 - The plugin listing has a display name, an icon and a short description.

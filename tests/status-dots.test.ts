@@ -17,12 +17,37 @@ type App = {
   isMissing?: boolean
   // The app's tools aren't connected yet, as in a process that has just started.
   isConnecting?: boolean
+  // The app's own record of the session (its data file), when a test gives one.
+  record?: Record<string, unknown>
+  // Renames of this session never answer, as a stuck call wouldn't.
+  isStuck?: boolean
 }
 
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], isError })
 
-// Stands in for the engine and the desktop app's session tools.
+const DATA = 'C:/Users/me/AppData/Local/Claude-Data'
+const RECORD = `${DATA}/claude_abc/claude-code-sessions/org/acct/local_1.json`
+
+// Stands in for the engine, the desktop app's session tools and its data folder.
+// Returns the mocked clock.
 function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
+  const clock = mock.clock(on, { now: 0 })
+  mock.env(on, { LOCALAPPDATA: 'C:/Users/me/AppData/Local' })
+  const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
+  // The engine may hand paths over in Windows form.
+  const norm = (path: string) => path.replace(/\\/g, '/')
+  on('fs.exists', (_, e) => ({ value: app.record !== undefined && [DATA, `${DATA}/claude_abc/claude-code-sessions`, RECORD].includes(norm(e.path)) }))
+  on('fs.list', (_, e) => ({
+    value:
+      norm(e.path) === DATA ? [dir('claude_abc')]
+      : norm(e.path).endsWith('claude-code-sessions') ? [dir('org')]
+      : norm(e.path).endsWith('/org') ? [dir('acct')]
+      : [],
+  }))
+  on('fs.read', (_, e) => {
+    if (norm(e.path) !== RECORD || app.record === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: JSON.stringify(app.record) }
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'dots' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -49,6 +74,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       other.title = String(e.args.title)
       return { value: text(`Renamed session ${other.sessionId}.`) }
     }
+    if (app.isStuck) return new Promise<never>(() => undefined)
     const title = String(e.args.title)
     if (app.source === 'user' && title !== app.title) return { value: text(USER_TITLE_REFUSAL, true) }
     app.title = title
@@ -56,6 +82,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     app.renames.push(title)
     return { value: text(`Renamed this session to "${title}".`) }
   })
+  return clock
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -124,10 +151,9 @@ test('yellow when the answer ends on a question, green when a question sits mid-
 })
 
 test('blue when it finishes while you are not looking, green once you open it', async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
   mock.store(on)
   const app: App = { title: 'Long build', source: 'auto', renames: [], isOffScreen: true }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
 
   await begin($)
@@ -142,10 +168,9 @@ test('blue when it finishes while you are not looking, green once you open it', 
 })
 
 test('a new turn while blue stops the check', async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
   mock.store(on)
   const app: App = { title: 'Quick fix', source: 'auto', renames: [], isOffScreen: true }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
 
   await begin($)
@@ -158,10 +183,9 @@ test('a new turn while blue stops the check', async ($, on) => {
 })
 
 test('a blue dot turns green when you open the session after a restart', async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
   mock.store(on)
   const app: App = { title: '🔵 Finished overnight', source: 'tool', renames: [], isOffScreen: true }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
   expect(app.title).toBe('🔵 Finished overnight')
 
@@ -354,10 +378,9 @@ test('/dots off also takes the dot off other sessions, and leaves titles without
 })
 
 test("dots still work when the app's tools connect after the session starts", async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
   mock.store(on)
   const app: App = { title: 'Fresh process', source: 'tool', renames: [], isConnecting: true }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
   app.isConnecting = false
   await clock.advance(10_000)
@@ -368,14 +391,147 @@ test("dots still work when the app's tools connect after the session starts", as
 })
 
 test('a blue dot left from before is still checked when the tools connect late', async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
   mock.store(on)
   const app: App = { title: '🔵 Seen later', source: 'tool', renames: [], isConnecting: true }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
   app.isConnecting = false
   await clock.advance(10_000)
   expect(app.title).toBe('🟢 Seen later')
+})
+
+// The app's record once it has summed up the reply \`uuid\`.
+const summed = (category: string, uuid = 'a2', wrapUp?: Record<string, unknown>) => ({
+  lastAssistantUuid: uuid,
+  postTurnSummaryFor: uuid,
+  postTurnSummary: { status_category: category },
+  ...(wrapUp ? { turnWrapUp: wrapUp } : {}),
+})
+
+test("yellow when the app says Claude is blocked on you, though the reply asks nothing", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Ship the build', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer', undefined, 'The build is ready. You need to sign the installer before I can upload it.')
+  expect(app.title).toBe('🟢 Ship the build')
+  app.record = summed('blocked')
+  await clock.advance(2_000)
+  expect(app.title).toBe('🟡 Ship the build')
+})
+
+test('red when the app says the turn failed', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deploy', source: 'auto', renames: [], record: summed('failed') }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer', undefined, 'The deploy did not go through.')
+  await clock.advance(2_000)
+  expect(app.title).toBe('🔴 Deploy')
+})
+
+test("the app's verdict wins over a guess from a closing question", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Tidy imports', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer', undefined, 'Done. Anything else?')
+  expect(app.title).toBe('🟡 Tidy imports')
+  app.record = summed('completed')
+  await clock.advance(2_000)
+  expect(app.title).toBe('🟢 Tidy imports')
+})
+
+test('a question in the end-of-turn box stays yellow whatever the summary says', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Release', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await end($, 'answer')
+  app.record = summed('completed', 'a2', { description: 'Built it.', needsUser: 'Publish it?' })
+  await clock.advance(2_000)
+  expect(app.title).toBe('🟡 Release')
+})
+
+test('the verdict waits for the summary of the latest reply', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Refactor', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  // Still the summary of an earlier reply.
+  app.record = { ...summed('blocked', 'a1'), lastAssistantUuid: 'a2' }
+  await clock.advance(4_000)
+  expect(app.title).toBe('🟢 Refactor')
+  app.record = summed('blocked', 'a2')
+  await clock.advance(2_000)
+  expect(app.title).toBe('🟡 Refactor')
+})
+
+test('a new turn stops the verdict check of the one before', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Quick turns', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  await begin($)
+  app.record = summed('blocked')
+  await clock.advance(10_000)
+  expect(app.title).toBe('Quick turns')
+})
+
+test('a turn whose end was missed gets its dot when the session starts again', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Missed end', source: 'tool', renames: [], record: summed('blocked') }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🟡 Missed end')
+})
+
+test('a missed finish comes back blue when you are not looking, and a seen green stays green', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Missed finish', source: 'tool', renames: [], record: summed('completed'), isOffScreen: true }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🔵 Missed finish')
+})
+
+test('a green dot is not turned blue at start by a finished verdict', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Seen already', source: 'tool', renames: [], record: summed('completed'), isOffScreen: true }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🟢 Seen already')
+  expect(app.renames).toEqual([])
+})
+
+test('a stuck app call times out, and the dots after it still work', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Stuck once', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  app.isStuck = true
+  const stuck = begin($)
+  await clock.advance(11_000)
+  await stuck
+  app.isStuck = false
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Stuck once')
 })
 
 test('outside the desktop app it does nothing and breaks nothing', async ($, on) => {

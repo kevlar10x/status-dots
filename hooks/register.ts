@@ -27,6 +27,12 @@ const SEEN_CHECK_MS = 5000
 // How often, and how many times, a starting session retries reaching the app.
 const START_RETRY_MS = 5000
 const START_TRIES = 6
+// How often, and how many times, a finished turn looks for the app's verdict.
+const VERDICT_CHECK_MS = 2000
+const VERDICT_TRIES = 15
+// An app call that hasn't answered by then counts as failed, so one stuck call
+// can't hold up every dot after it.
+const CALL_TIMEOUT_MS = 10000
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
@@ -47,17 +53,131 @@ let isAsking = false
 let seenCheck: Timer | undefined
 // A turn has started in this process, so the start check has nothing left to do.
 let hasTurned = false
+// Counts the main loop's turns, so a check started for one turn knows when another began.
+let turnCount = 0
+// After a turn: the next look for the app's verdict on it.
+let verdictCheck: Timer | undefined
+let sessionId: string | undefined
+let recordPath: string | undefined
+let recordSearches = 0
+
+// What the app keeps about this session in its data folder, the fields its own
+// sidebar reads for a finished turn. The file is the app's and private, so
+// anything unexpected in it only means no verdict, and the mod's own checks stand.
+type AppRecord = {
+  lastAssistantUuid?: string
+  postTurnSummary?: { status_category?: string }
+  postTurnSummaryFor?: string
+  turnWrapUp?: { needsUser?: string }
+}
+type Verdict = 'waiting' | 'failed' | 'finished'
 
 function textOf(result: McpToolResult) {
   const block = result.content.find(one => one.type === 'text') as { text?: string } | undefined
   return block?.text ?? ''
 }
 
+async function call($: Engine, server: string, tool: string, args: Record<string, unknown>) {
+  let timer: Timer | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = $.clock.after(CALL_TIMEOUT_MS, () => reject(new Error(`${tool} timed out`)))
+  })
+  try {
+    return await Promise.race([$.mcp.call(server, tool, args), timeout])
+  } finally {
+    timer?.cancel()
+  }
+}
+
 async function titleOf($: Engine) {
-  const result = await $.mcp.call(SESSIONS, 'get_session', { session_id: 'self' })
+  const result = await call($, SESSIONS, 'get_session', { session_id: 'self' })
   if (result.isError) return undefined
-  const session = JSON.parse(textOf(result)) as { title?: string }
+  const session = JSON.parse(textOf(result)) as { title?: string; sessionId?: string }
+  sessionId ??= session.sessionId
   return session.title?.trim() ?? ''
+}
+
+function statusOf(title: string): Status | undefined {
+  return (Object.keys(DOTS) as Status[]).find(status => title.startsWith(`${DOTS[status]} `))
+}
+
+// The app keeps one file per session under %LOCALAPPDATA%\Claude-Data. Looked up
+// once, then reused; a few tries, since the session's id comes from the app.
+async function findRecord($: Engine) {
+  if (recordPath !== undefined || sessionId === undefined || recordSearches >= 3) return recordPath
+  recordSearches += 1
+  const local = await $.env.get('LOCALAPPDATA')
+  if (!local) return undefined
+  const base = `${local}/Claude-Data`
+  if (!(await $.fs.exists(base))) return undefined
+  for (const account of await $.fs.list(base)) {
+    if (account.kind !== 'dir' || !account.name.startsWith('claude_')) continue
+    const root = `${base}/${account.name}/claude-code-sessions`
+    if (!(await $.fs.exists(root))) continue
+    for (const outer of await $.fs.list(root)) {
+      if (outer.kind !== 'dir') continue
+      for (const inner of await $.fs.list(`${root}/${outer.name}`)) {
+        const path = `${root}/${outer.name}/${inner.name}/${sessionId}.json`
+        if (inner.kind === 'dir' && (await $.fs.exists(path))) return (recordPath = path)
+      }
+    }
+  }
+  return undefined
+}
+
+async function readRecord($: Engine) {
+  try {
+    const path = await findRecord($)
+    return path === undefined ? undefined : (JSON.parse(await $.fs.read(path)) as AppRecord)
+  } catch {
+    return undefined
+  }
+}
+
+// The app's verdict on the last turn, as its sidebar reads it: the end-of-turn
+// box asking you something, or a summary that says Claude is blocked on you or
+// needs your input, is your turn; a failed turn is red; anything else is a
+// finish. Undefined until the app has summed up the latest reply.
+function verdictOf(record: AppRecord): Verdict | undefined {
+  const summary = record.postTurnSummary
+  if (summary === undefined || record.lastAssistantUuid === undefined) return undefined
+  if (record.postTurnSummaryFor !== record.lastAssistantUuid) return undefined
+  const category = summary.status_category
+  if (category === 'failed') return 'failed'
+  if (record.turnWrapUp?.needsUser) return 'waiting'
+  if ((category === 'blocked' || category === 'need_input') && record.turnWrapUp === undefined) return 'waiting'
+  return 'finished'
+}
+
+async function applyVerdict($: Engine, verdict: Verdict) {
+  if (verdict === 'finished') {
+    if (wanted !== 'done' && wanted !== 'fresh') await showFinished($)
+    return
+  }
+  if (wanted === verdict) return
+  stopWatching()
+  await show($, verdict)
+}
+
+// The app sums up a turn a few seconds after it ends. Until then the dot comes
+// from the mod's own checks; once the summary is in, the app's verdict wins.
+function followVerdict($: Engine, triesLeft = VERDICT_TRIES) {
+  const turn = turnCount
+  verdictCheck?.cancel()
+  verdictCheck = $.clock.after(VERDICT_CHECK_MS, async () => {
+    verdictCheck = undefined
+    if (turn !== turnCount) return
+    const record = await readRecord($)
+    const verdict = record === undefined ? undefined : verdictOf(record)
+    if (turn !== turnCount) return
+    if (verdict !== undefined) return applyVerdict($, verdict).catch(() => undefined)
+    if (triesLeft > 1) followVerdict($, triesLeft - 1)
+  })
+}
+
+function stopFollowing() {
+  verdictCheck?.cancel()
+  verdictCheck = undefined
 }
 
 // Writes the wanted dot into the title, one write at a time. A change asked for
@@ -77,7 +197,7 @@ async function paint($: Engine) {
       if (bare === '') return
       const next = status === undefined ? bare : `${DOTS[status]} ${bare}`
       if (next !== title) {
-        const result = await $.mcp.call(SESSIONS, 'set_session_title', { session_id: 'self', title: next })
+        const result = await call($, SESSIONS, 'set_session_title', { session_id: 'self', title: next })
         if (result.isError) {
           if (/set by the user/.test(textOf(result))) {
             isUserTitle = true
@@ -113,14 +233,14 @@ async function show($: Engine, status: Status | undefined) {
 // Takes the dot off every other session the app lists, archived ones too, so
 // turning the dots off (before an uninstall, say) leaves none behind.
 async function clearOthers($: Engine) {
-  const listed = await $.mcp.call(SESSIONS, 'list_sessions', { limit: 200, include_archived: true })
+  const listed = await call($, SESSIONS, 'list_sessions', { limit: 200, include_archived: true })
   if (listed.isError) return 0
   const sessions = JSON.parse(textOf(listed)) as { sessionId: string; title?: string }[]
   let cleared = 0
   for (const session of sessions) {
     const title = session.title?.trim() ?? ''
     if (!DOT.test(title)) continue
-    const result = await $.mcp.call(SESSIONS, 'set_session_title', {
+    const result = await call($, SESSIONS, 'set_session_title', {
       session_id: session.sessionId,
       title: title.replace(DOT, ''),
     })
@@ -133,7 +253,7 @@ async function clearOthers($: Engine) {
 // shown, so a session the check can't reach goes green instead of staying blue.
 async function isOnScreen($: Engine) {
   try {
-    const result = await $.mcp.call(WINDOW, 'get_window_layout', {})
+    const result = await call($, WINDOW, 'get_window_layout', {})
     if (result.isError) return true
     const layout = JSON.parse(textOf(result)) as { this_session?: { on_screen?: boolean } }
     return layout.this_session?.on_screen !== false
@@ -173,11 +293,13 @@ function stopWatching() {
 }
 
 // What a session finds when it starts. With the dots off, a dot left from
-// before goes. With them on, every dot stays: a yellow one left by a closed app
-// still means the session needs you, and a blue one turns green once you've
-// opened the session. In a process that has just started the app's tools may
-// not be connected yet, so the check tries again a few times, until a turn
-// starts and takes over.
+// before goes. With them on, the dot is brought in line with the app's verdict
+// on the last turn, which also catches a turn whose end the mod missed (its
+// process stopped, or the app couldn't be reached then). A yellow dot left by a
+// closed app stays, since the session still needs you, and a blue one turns
+// green once you've opened the session. In a process that has just started the
+// app's tools may not be connected yet, so the check tries again a few times,
+// until a turn starts and takes over.
 async function checkAtStart($: Engine, triesLeft: number) {
   if (hasTurned) return
   let title: string
@@ -187,12 +309,18 @@ async function checkAtStart($: Engine, triesLeft: number) {
     if (triesLeft > 0) $.clock.after(START_RETRY_MS, () => void checkAtStart($, triesLeft - 1).catch(() => undefined))
     return
   }
-  if (isOff && DOT.test(title)) await show($, undefined)
-  if (!isOff && title.startsWith(`${DOTS.fresh} `)) {
-    wanted = 'fresh'
-    if (await isOnScreen($)) await show($, 'done')
-    else watchUntilSeen($)
+  if (isOff) {
+    if (DOT.test(title)) await show($, undefined)
+    return
   }
+  wanted = statusOf(title)
+  const record = await readRecord($)
+  const verdict = record === undefined ? undefined : verdictOf(record)
+  if (hasTurned) return
+  if (verdict !== undefined) await applyVerdict($, verdict)
+  if (wanted !== 'fresh' || hasTurned) return
+  if (await isOnScreen($)) await show($, 'done')
+  else watchUntilSeen($)
 }
 
 // Back to working (no dot) once nothing waits on you. Tool calls only return
@@ -216,7 +344,9 @@ export const register: Register = on => {
       questions = 0
       isAsking = false
       stopWatching()
+      stopFollowing()
       hasTurned = true
+      turnCount += 1
       // You may have handed the title back since (an approved rename by Claude).
       isUserTitle = false
       await show($, undefined)
@@ -235,6 +365,7 @@ export const register: Register = on => {
     if (e.reason === 'answer' && !isAsked) await showFinished($)
     // Stopped by you: no dot, since you were there to see it.
     else await show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
+    if (e.reason === 'answer') followVerdict($)
 
     return result
   })
@@ -276,6 +407,7 @@ export const register: Register = on => {
     await $.store.set('isOff', isOff)
     if (isOff) {
       stopWatching()
+      stopFollowing()
       await show($, undefined)
       let cleared = 0
       try {
