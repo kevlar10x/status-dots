@@ -53,9 +53,9 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
 
 const start = ($: Engine) => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 const begin = ($: Engine, agentId?: string) => $.turn.start({ text: 'go', turnId: 't1', ...(agentId ? { agentId } : {}) })
-const end = ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string) =>
+const end = ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string, answer = 'Done.') =>
   $.turn.complete({
-    answer: reason === 'answer' ? 'Done.' : '',
+    answer: reason === 'answer' ? answer : '',
     durationMs: 10,
     isAborted: reason === 'aborted',
     turnId: 't1',
@@ -79,7 +79,7 @@ test('no dot while working (the app shows its grey one), green when the turn end
   expect(app.title).toBe('Fix the login bug')
 })
 
-test('white when the answer ends with a suggested next step', async ($, on) => {
+test('yellow when the turn ends by asking you something', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Ship the release', source: 'auto', renames: [] }
   engine(on, app)
@@ -88,13 +88,32 @@ test('white when the answer ends with a suggested next step', async ($, on) => {
   await begin($)
   await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', actions: [] })
   await end($, 'answer')
-  expect(app.title).toBe('⚪ Ship the release')
+  expect(app.title).toBe('🟡 Ship the release')
 
-  // A recap alone draws no box: green.
+  // A recap alone asks nothing: green.
   await begin($)
   await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.' })
   await end($, 'answer')
   expect(app.title).toBe('🟢 Ship the release')
+})
+
+test('yellow when the answer ends on a question, green when a question sits mid-text', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the build', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer', undefined, 'The build passes now.\n\nWant me to push it?')
+  expect(app.title).toBe('🟡 Fix the build')
+
+  await begin($)
+  await end($, 'answer', undefined, 'Pushed it.\n\n**Should I tag a release?**')
+  expect(app.title).toBe('🟡 Fix the build')
+
+  await begin($)
+  await end($, 'answer', undefined, 'You asked why it failed? A missing import. Fixed and pushed.')
+  expect(app.title).toBe('🟢 Fix the build')
 })
 
 test('red when an error or a refusal ends the turn', async ($, on) => {
@@ -210,12 +229,25 @@ test("no dot before the app has named the session, so its naming isn't blocked",
   expect(app.title).toBe('🟢 Named by the app')
 })
 
-test('a yellow dot left from a closed app is cleared when the session starts', async ($, on) => {
+test('a yellow dot stays when the session starts again, since it still needs you', async ($, on) => {
   mock.store(on)
   const app: App = { title: '🟡 Was waiting', source: 'tool', renames: [] }
   engine(on, app)
   await start($)
-  expect(app.title).toBe('Was waiting')
+  expect(app.title).toBe('🟡 Was waiting')
+  expect(app.renames).toEqual([])
+})
+
+test("0.1.0's white dot is replaced at the next change", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '⚪ Old suggestion', source: 'tool', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('Old suggestion')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Old suggestion')
 })
 
 test('a green dot stays when the session starts again', async ($, on) => {

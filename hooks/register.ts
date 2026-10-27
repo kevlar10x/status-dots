@@ -3,25 +3,28 @@ import type { EngineInterface as Engine, McpToolResult, Register } from 'claude-
 // status-dots by kevlar10x, MIT: https://github.com/kevlar10x/status-dots
 //
 // Puts a colored dot in front of this session's title, which the Code tab's
-// sidebar shows: yellow while Claude waits for your answer or approval, green
-// when a turn ended with an answer, white when that answer ended with a
-// suggested next step to pick, red when an error or a refusal ended it. While
-// Claude works the title has no dot: the app's own grey dot shows then, and
-// emoji have no grey. The desktop app gives mods no way to recolor its own
-// sidebar dot, so the title carries it. A title you typed yourself is yours:
-// the app won't let anything but an approved rename change it, so that session
-// gets no dot.
+// sidebar shows, so the list reads like a traffic light: red when an error or
+// a refusal stopped Claude, yellow when it's your turn (a question, a plan or
+// a permission card waits for you, or the turn ended by asking you something),
+// green when it finished and needs nothing from you. While Claude works the
+// title has no dot: the app's own grey dot shows then. The desktop app gives
+// mods no way to recolor its own sidebar dot, so the title carries it. A title
+// you typed yourself is yours: the app won't let anything but an approved
+// rename change it, so that session gets no dot.
 
-type Status = 'waiting' | 'done' | 'suggested' | 'failed'
+type Status = 'waiting' | 'done' | 'failed'
 
 // Yellow is the app's own color for a session that needs input.
-const DOTS: Record<Status, string> = { waiting: '🟡', done: '🟢', suggested: '⚪', failed: '🔴' }
+const DOTS: Record<Status, string> = { waiting: '🟡', done: '🟢', failed: '🔴' }
+// ⚪ is 0.1.0's dot for a suggested next step, matched so it's replaced or cleared.
 const DOT = /^(?:⚪|🟡|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
+// Text whose last line is a question, past any closing markdown or quotes.
+const ENDS_ASKING = /\?["'”’)\]*_`]*\s*$/u
 
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
@@ -31,7 +34,8 @@ let isWriting = false
 let blocked: 'user' | 'app' | undefined
 let isOff = false
 let questions = 0
-let hasSuggestion = false
+// The turn's end-of-turn box asks you something.
+let isAsking = false
 
 function textOf(result: McpToolResult) {
   const block = result.content.find(one => one.type === 'text') as { text?: string } | undefined
@@ -123,13 +127,14 @@ export const register: Register = on => {
     await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots on or off' })
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
-    // A yellow dot from a run that ended without its turn's end (the app closed
-    // mid-turn) is stale; with the dots off, any dot goes.
-    try {
-      const title = (await titleOf($)) ?? ''
-      if (isOff ? DOT.test(title) : title.startsWith(`${DOTS.waiting} `)) await show($, undefined)
-    } catch {
-      blocked = 'app'
+    // With the dots off, a dot left from before goes. With them on, every dot
+    // stays: a yellow one left by a closed app still means the session needs you.
+    if (isOff) {
+      try {
+        if (DOT.test((await titleOf($)) ?? '')) await show($, undefined)
+      } catch {
+        blocked = 'app'
+      }
     }
 
     return result
@@ -138,7 +143,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       questions = 0
-      hasSuggestion = false
+      isAsking = false
       // You may have handed the title back since (an approved rename by Claude).
       if (blocked === 'user') blocked = undefined
       await show($, undefined)
@@ -151,7 +156,9 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
     questions = 0
-    const answered = hasSuggestion ? 'suggested' : 'done'
+    // An answer that asks you something leaves it your turn: through the
+    // end-of-turn box, or by ending its text on a question.
+    const answered = isAsking || ENDS_ASKING.test(e.answer) ? 'waiting' : 'done'
     // Stopped by you: no dot, since you were there to see it.
     await show($, e.reason === 'answer' ? answered : e.reason === 'aborted' ? undefined : 'failed')
 
@@ -178,7 +185,7 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     if (e.tool === WRAP_UP && e.agentId === undefined) {
       const ask = (e as { ask?: unknown }).ask
-      if (typeof ask === 'string' && ask.trim() !== '') hasSuggestion = true
+      if (typeof ask === 'string' && ask.trim() !== '') isAsking = true
     }
     const isQuestion = ASKS.has(e.tool)
     if (isQuestion) {

@@ -2,6 +2,13 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.2.0 - 2026-10-27
+
+- The colors now read like a traffic light: red when an error stopped Claude, yellow when it's your turn, green when it's done and needs nothing from you.
+- A turn that ends by asking you something (the app's next-step box) now gets yellow instead of white, since it's waiting on you too. Old white dots change the next time the session works.
+- A reply whose last line is a question also gets yellow, so a question asked in plain text doesn't hide behind a green dot.
+- A yellow dot now stays when the app restarts, because that session still needs you.
+
 ## 0.1.0 - 2026-10-27
 
 - First release. Each session's title in the desktop app's sidebar starts with a dot: yellow while Claude waits for you, green when it finished with an answer, white when it finished and suggested a next step, red when an error or a refusal stopped it.

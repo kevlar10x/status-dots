@@ -4,11 +4,12 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 
 | Dot | The session |
 |---|---|
-| 🟡 | is waiting for you: a question, a plan to approve or a permission card |
-| 🟢 | finished with an answer |
-| ⚪ | finished and suggested a next step for you to pick |
 | 🔴 | was stopped by an error or a refusal |
+| 🟡 | is waiting for you: a question, a plan to approve, a permission card, or a turn that ended by asking you something |
+| 🟢 | finished and needs nothing from you |
 | no dot | is working (the app's own grey dot shows that), or you stopped it yourself |
+
+Read it like a traffic light: red needs fixing, yellow is your turn, green is done.
 
 The app's own dot tells you a session is working, needs you or has something unread. Once you've opened a finished session, its dot goes away and the list no longer says how it ended. With several sessions running, status-dots keeps that in view.
 
@@ -46,11 +47,13 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - A new session gets its first dot when Claude finishes its first turn. The mod leaves a title alone until the app has named the session, so the app's naming still works.
 - Once a session has a dot, the app counts its title as set and stops renaming that session on its own, for example to a pull request's title.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
+- A turn counts as asking you something when it ends with the app's next-step box, or when the last line of Claude's reply is a question. A question earlier in the reply doesn't count.
+- A yellow dot stays when the app restarts. The session either asked you something or stopped while it waited on you, so it still needs you.
 - The title moves over a little when its dot comes and goes.
 
 ## Privacy
 
-The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
+The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. At the end of each turn it checks whether Claude's reply ends on a question, and keeps nothing of it. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
 
 ## What it calls and hooks
 
@@ -61,10 +64,10 @@ It calls the desktop app's session tools (`ccd_session_mgmt`) without Claude ask
 
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, white or red when the turn ends. Subagents' turns are skipped.
-- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and white when the app's end-of-turn box (`wrap_up`) carries a question for you.
+- `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. Subagents' turns are skipped.
+- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something.
 - `classic.PermissionRequest` and `classic.Notification`: yellow while a permission card is up.
-- `session.start`: registers `/dots` and clears a yellow dot left over from a session that closed mid-turn.
+- `session.start`: registers `/dots`, and takes off a leftover dot when the dots are off.
 
 ## Limits
 
