@@ -2,7 +2,7 @@
 
 A Claude Code mod for the Claude desktop app. It puts a colored dot in front of each session's title in the Code tab's sidebar, so you can tell how a session ended without opening it.
 
-![The Code tab sidebar with status-dots: a green dot in front of each finished session, with the session names blurred](docs/screenshot.png)
+![The Code tab sidebar with status-dots: green dots on finished sessions and yellow dots on two that are waiting for you, with the session and group names blurred](docs/screenshot.png)
 
 | Dot | The session |
 |---|---|

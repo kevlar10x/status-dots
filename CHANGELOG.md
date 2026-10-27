@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## Unreleased
+
+- The README's screenshot now shows green and yellow dots, not only green.
+
 ## 0.4.0 - 2026-10-27
 
 - Better status detection: a few seconds after a turn ends, the dot follows the app's own summary of that turn, the one its sidebar uses. A reply that leaves you something to do now gets yellow even when it doesn't end on a question, and a turn the app counts as failed gets red.
