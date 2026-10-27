@@ -501,6 +501,26 @@ test('a turn whose end was missed gets its dot when the session starts again', a
   expect(app.title).toBe('🟡 Missed end')
 })
 
+test('a white dot left by a run that stopped mid-turn goes when no turn picks it up', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '⚪ Stopped mid-turn', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+  expect(app.title).toBe('⚪ Stopped mid-turn')
+  await clock.advance(20_000)
+  expect(app.title).toBe('Stopped mid-turn')
+})
+
+test('a white dot stays when the turn picks up again after a restart', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '⚪ Resumed', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await clock.advance(20_000)
+  expect(app.title).toBe('⚪ Resumed')
+})
+
 test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
   mock.store(on)
   const app: App = { title: '🟡 btt', source: 'tool', renames: [], record: summed('blocked') }

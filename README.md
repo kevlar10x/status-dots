@@ -39,6 +39,8 @@ In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt 
 
 It needs a Claude Code version that runs mods. It was built and tested on Claude Code 2.1.308 with desktop app 3.6556 on Windows. Terminal sessions have no sidebar, so there it does nothing.
 
+It works in sessions that start after you install it. Sessions that are already open pick it up once they restart, for example when you restart the app.
+
 ## Turning it off
 
 `/dots off` takes the dot off this session and every other session that has one, and keeps the dots off everywhere. `/dots on` turns them back on, and each session gets its dot the next time Claude finishes there.
@@ -55,6 +57,7 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - A few seconds after a turn ends, the mod checks the app's record of it. That puts back a question in the next-step box, or an error, that the mod missed when the turn ended.
 - A session that finishes while it's on screen goes straight to green. A blue one checks every 5 seconds whether you've opened it, and only while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
 - When a session starts again, its dot is matched to the app's record of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
+- If a session stopped in the middle of a turn (its process ended, or the app closed and didn't pick the turn up again), its white dot goes when the session starts and no turn follows within 20 seconds.
 - The title moves over a little when its dot comes and goes.
 
 ## Privacy
@@ -81,7 +84,7 @@ It hooks these events and passes each one on unchanged:
 - `turn.start` and `turn.complete`: the dot turns white while Claude works, then green, blue, yellow or red when the turn ends. Subagents' turns are skipped.
 - `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
-- `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's summary of the last turn.
+- `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's record of the last turn.
 
 It has no hook on permission checks, so it never takes part in a permission decision.
 
@@ -89,7 +92,7 @@ It has no hook on permission checks, so it never takes part in a permission deci
 
 - Tested on Windows only.
 - The app's record comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
-- Yellow for questions has been seen working in the desktop app. Yellow for permission cards depends on Claude Code's notification event and hasn't been seen live yet. The app's own dot turns yellow for those either way.
+- A permission card may not turn the dot yellow. The app keeps those to itself, and the mod only hears of them if Claude Code reports them, which hasn't been seen live yet. While a card waits, the dot can stay white; the app's own dot turns yellow then.
 
 ## Uninstall
 

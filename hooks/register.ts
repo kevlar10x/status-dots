@@ -26,6 +26,8 @@ const SEEN_CHECK_MS = 5000
 // How often, and how many times, a starting session retries reaching the app.
 const START_RETRY_MS = 5000
 const START_TRIES = 6
+// How long a starting session waits for a turn before calling a white dot stale.
+const STALE_WORKING_MS = 20000
 // How often, and how many times, a finished turn looks for the app's verdict.
 const VERDICT_CHECK_MS = 2000
 const VERDICT_TRIES = 15
@@ -317,6 +319,15 @@ async function checkAtStart($: Engine, triesLeft: number) {
   const verdict = record === undefined ? undefined : verdictOf(record)
   if (hasTurned) return
   if (verdict !== undefined) await applyVerdict($, verdict)
+  // A white dot with no turn behind it is left from a run that stopped mid-turn:
+  // the process ended, or the app closed without picking the turn up again. A
+  // turn that resumes takes over within moments; if none does, the dot goes.
+  if (wanted === 'working') {
+    $.clock.after(STALE_WORKING_MS, () => {
+      if (!hasTurned && wanted === 'working') void show($, undefined).catch(() => undefined)
+    })
+    return
+  }
   if (wanted !== 'fresh' || hasTurned) return
   if (await isOnScreen($)) await show($, 'done')
   else watchUntilSeen($)

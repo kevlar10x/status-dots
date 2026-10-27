@@ -6,6 +6,11 @@ Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
 - The README's screenshot now shows green and yellow dots, not only green.
 
+## 0.5.1 - 2026-10-27
+
+- A white dot left by a session that stopped in the middle of a turn now goes away when the session starts again and no turn picks up.
+- The README says that sessions already open pick the mod up after a restart, and that a permission card can leave the dot white.
+
 ## 0.5.0 - 2026-10-27
 
 - A session that's working now shows a white dot, so every session in the list has one. Before, a working session had no dot and only the app's own grey dot on the right showed it.
