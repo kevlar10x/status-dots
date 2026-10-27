@@ -49,7 +49,7 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 
 ## Things to know
 
-- Sessions you named yourself get no dot. The app won't let anything change a title you typed unless you approve it, and a mod has no way to ask. If you want a dot on one of them, ask Claude in that session to rename it and approve that once. The mod explains this in a short note the first time it happens.
+- Sessions you named yourself get no dot, and the mod never tries to rename them. The app holds any rename of a title you typed for your approval, and approving can't work for a mod's rename, so each try would only leave another approval card. If you want a dot on one of them, ask Claude in that session to rename it and approve that once. If you rename a session from the sidebar and keep the dot in front, that dot is part of your name now and stays until you take it out. The mod explains this in a short note the first time it happens.
 - A new session gets its first dot when Claude finishes its first turn. The mod leaves a title alone until the app has named the session, so the app's naming still works.
 - Once a session has a dot, the app counts its title as set and stops renaming that session on its own, for example to a pull request's title.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
@@ -63,7 +63,7 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 
 ## Privacy
 
-The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. To check how each turn ended, it reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`), and uses only two things from it: whether the next-step box asked you something, and whether an error ended the turn. It reads no other session's file and keeps nothing from it. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
+The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. It reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`) and uses three things from it: whether the next-step box asked you something, whether an error ended the turn, and whether you named the session yourself. When you run `/dots off`, it reads one thing from the file of each other session that has a dot: whether you named that one yourself, so it can leave it alone. It keeps nothing from any of these files. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
 
 ## What it calls and hooks
 
@@ -76,9 +76,9 @@ When a turn ends, and while a session's dot is blue, it also calls `get_window_l
 
 A write that can't reach the app (its tools still connecting, say) is tried again every second for up to 10 seconds. Where there's no app to reach, it soon stops retrying.
 
-A call to the app that hasn't answered after 10 seconds is dropped, so one stuck call can't stop the dots in that session.
+A call to the app that hasn't answered after 10 seconds is dropped, so one stuck call can't hold up the rest. A rename that doesn't answer is most likely waiting on an approval card, so after one, that session writes no more dots until it restarts, and the card stays the only one.
 
-It reads one file: this session's record in the app's data folder, once when the session starts, and after a turn ends until the app's summary is in (it looks every 2 seconds for up to 30 seconds, checks the file's time first, and reads it only when it has changed).
+It reads this session's record in the app's data folder when the session starts, before each dot change, and after a turn ends until the app's summary is in (it looks every 2 seconds for up to 30 seconds). It checks the file's time first and reads the file again only when it has changed. `/dots off` also reads the records of your other sessions that have a dot.
 
 Those are the only tools it calls. It runs no commands or programs and fetches nothing from the network. All it sends is a session title, with the dot added or taken off, to the desktop app on your computer.
 

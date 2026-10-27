@@ -19,8 +19,15 @@ type App = {
   isConnecting?: boolean
   // The app's own record of the session (its data file), when a test gives one.
   record?: Record<string, unknown>
-  // Renames of this session never answer, as a stuck call wouldn't.
+  // Renames of this session, or reads of its title, never answer, as a stuck call wouldn't.
   isStuck?: boolean
+  isStuckReading?: boolean
+  // A rename of a title the user set waits on an approval card, as the app
+  // does where it can show one, instead of being refused. Each card is counted.
+  canApprove?: boolean
+  cards?: number
+  // The app's records of the other sessions, by session id.
+  otherRecords?: Record<string, Record<string, unknown>>
   // How many times the mod read this session from the app.
   reads?: number
   // Every call the mod made to the app, answered or not.
@@ -66,7 +73,7 @@ let current: MockClock
 
 // Lets a few rounds of pending work run, inside a hook where the clock can't settle.
 const flush = async () => {
-  for (let i = 0; i < 50; i += 1) await Promise.resolve()
+  for (let i = 0; i < 200; i += 1) await Promise.resolve()
 }
 
 const RENAME = 'mcp__ccd_session_mgmt__set_session_title'
@@ -80,7 +87,13 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   // The engine may hand paths over in Windows form.
   const norm = (path: string) => path.replace(/\\/g, '/')
-  on('fs.exists', (_, e) => ({ value: app.record !== undefined && [DATA, `${DATA}/claude_abc/claude-code-sessions`, RECORD].includes(norm(e.path)) }))
+  const OTHER = new RegExp(`^${DATA}/claude_abc/claude-code-sessions/org/acct/(local_\\w+)\\.json$`)
+  const recordAt = (path: string) =>
+    norm(path) === RECORD ? app.record : app.otherRecords?.[OTHER.exec(norm(path))?.[1] ?? '']
+  const hasRecords = () => app.record !== undefined || app.otherRecords !== undefined
+  on('fs.exists', (_, e) => ({
+    value: hasRecords() && ([DATA, `${DATA}/claude_abc/claude-code-sessions`].includes(norm(e.path)) || recordAt(e.path) !== undefined),
+  }))
   on('fs.list', (_, e) => ({
     value:
       norm(e.path) === DATA ? [dir('claude_abc')]
@@ -89,14 +102,16 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       : [],
   }))
   on('fs.read', (_, e) => {
-    if (norm(e.path) !== RECORD || app.record === undefined) throw new Error(`ENOENT ${e.path}`)
-    app.fileReads = (app.fileReads ?? 0) + 1
-    return { value: JSON.stringify(app.record) }
+    const record = recordAt(e.path)
+    if (record === undefined) throw new Error(`ENOENT ${e.path}`)
+    if (norm(e.path) === RECORD) app.fileReads = (app.fileReads ?? 0) + 1
+    return { value: JSON.stringify(record) }
   })
   // The file's time changes whenever the record does.
   on('fs.stat', (_, e) => {
-    if (norm(e.path) !== RECORD || app.record === undefined) throw new Error(`ENOENT ${e.path}`)
-    const json = JSON.stringify(app.record)
+    const record = recordAt(e.path)
+    if (record === undefined) throw new Error(`ENOENT ${e.path}`)
+    const json = JSON.stringify(record)
     let mtimeMs = 0
     for (let i = 0; i < json.length; i += 1) mtimeMs = (mtimeMs * 31 + json.charCodeAt(i)) % 1_000_000_007
     return { value: { kind: 'file' as const, size: json.length, mtimeMs, isLink: false } }
@@ -123,6 +138,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (app.isMissing || app.isConnecting) throw new Error(`no MCP server named ${e.server}`)
     if (e.tool === 'get_session') {
       app.reads = (app.reads ?? 0) + 1
+      if (app.isStuckReading) return new Promise<never>(() => undefined)
       return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
     }
     if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
@@ -131,15 +147,20 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       await app.layoutHold
       return { value: text(JSON.stringify({ this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
     }
+    const awaitCard = () => {
+      app.cards = (app.cards ?? 0) + 1
+      return new Promise<never>(() => undefined)
+    }
     const other = app.others?.find(session => session.sessionId === e.args.session_id)
     if (other) {
+      if (app.canApprove && app.otherRecords?.[other.sessionId]?.titleSource === 'user') return awaitCard()
       other.title = String(e.args.title)
       return { value: text(`Renamed session ${other.sessionId}.`) }
     }
     if (app.isStuck) return new Promise<never>(() => undefined)
     await app.renameHold
     const title = String(e.args.title)
-    if (app.source === 'user' && title !== app.title) return { value: text(USER_TITLE_REFUSAL, true) }
+    if (app.source === 'user' && title !== app.title) return app.canApprove ? awaitCard() : { value: text(USER_TITLE_REFUSAL, true) }
     const was = app.title
     app.title = title
     app.source = 'tool'
@@ -687,21 +708,117 @@ test('a green dot is not turned blue at start by a finished verdict', async ($, 
   expect(app.renames).toEqual([])
 })
 
-test('a stuck app call times out, and the dots after it still work', async ($, on) => {
+test('a stuck title read times out, and the dots after it still work', async ($, on) => {
   mock.store(on)
-  const app: App = { title: '🟢 Stuck once', source: 'tool', renames: [] }
+  const app: App = { title: '🟢 Stuck once', source: 'tool', renames: [], isStuckReading: true }
   const clock = engine(on, app)
   await start($)
 
-  app.isStuck = true
-  // The hook doesn't wait for the stuck write; the turn goes on.
+  // The hook doesn't wait for the stuck read; the turn goes on.
   await begin($)
   await clock.advance(10_000)
-  app.isStuck = false
+  app.isStuckReading = false
   await clock.advance(1_000)
   expect(app.title).toBe('⚪ Stuck once')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Stuck once')
+})
+
+test('a rename that never answers is not tried again, since it may be waiting on an approval card', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Stuck', source: 'tool', renames: [], isStuck: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await clock.advance(10_000)
+  const calls = app.calls
+  await clock.advance(60_000)
+  await end($, 'answer')
+  await begin($)
+  await clock.advance(60_000)
+  expect(app.calls).toBe(calls)
+})
+
+test('a title you named yourself gets no rename at all, so no approval card', async ($, on) => {
+  mock.store(on)
+  // Renamed from the sidebar, with the dot it had then still in front.
+  const app: App = { title: '🟢 My own name', source: 'user', renames: [], canApprove: true, record: { titleSource: 'user' } }
+  const toasts: string[] = []
+  const clock = engine(on, app, [], toasts)
+  await start($)
+
+  await begin($)
+  await notify($)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  expect(app.cards ?? 0).toBe(0)
+  expect(app.title).toBe('🟢 My own name')
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('named this session yourself')
+})
+
+test('renaming the session yourself mid-way stops the dots before the next one asks', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'From the app', source: 'auto', renames: [], canApprove: true, record: { titleSource: 'auto' } }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 From the app')
+
+  // You rename it in the sidebar, keeping the dot in front.
+  app.title = '🟢 Mine now'
+  app.source = 'user'
+  app.record = { titleSource: 'user' }
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  expect(app.cards ?? 0).toBe(0)
+  expect(app.title).toBe('🟢 Mine now')
+})
+
+test('without the app record to go by, a title you named yourself costs at most one approval card', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'My own name', source: 'user', renames: [], canApprove: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await clock.advance(30_000)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  expect(app.cards).toBe(1)
+})
+
+test('/dots off leaves alone other sessions you named yourself', async ($, on) => {
+  mock.store(on)
+  const others = [
+    { sessionId: 'local_2', title: '🟢 Other done' },
+    { sessionId: 'local_5', title: '🟢 Named by me' },
+  ]
+  const app: App = {
+    title: 'This one',
+    source: 'tool',
+    renames: [],
+    others,
+    canApprove: true,
+    record: { titleSource: 'tool' },
+    otherRecords: { local_2: { titleSource: 'tool' }, local_5: { titleSource: 'user' } },
+  }
+  engine(on, app)
+  await start($)
+
+  const off = await dots($, 'off')
+  expect(app.cards ?? 0).toBe(0)
+  expect(others.map(session => session.title)).toEqual(['Other done', '🟢 Named by me'])
+  expect(off.text).toBe('Status dots are off. Also took the dot off 1 other session.')
 })
 
 test('once the title is known, a dot change is a single call to the app', async ($, on) => {

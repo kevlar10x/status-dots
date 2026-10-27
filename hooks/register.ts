@@ -82,7 +82,9 @@ let verdictCheck: Timer | undefined
 let sessionId: string | undefined
 let recordPath: string | undefined
 let recordSearches = 0
-// When the record file was last read, by its modification time.
+// The record as last read, and when the file was last read for a verdict, by
+// its modification time.
+let loaded: { mtimeMs: number; record: AppRecord } | undefined
 let recordReadAt: number | undefined
 
 // What the app keeps about this session in its data folder: whether the last
@@ -96,6 +98,8 @@ type AppRecord = {
   turnWrapUp?: { needsUser?: string }
   error?: unknown
   errorCategory?: unknown
+  // 'user' when you named the session yourself.
+  titleSource?: unknown
 }
 type Verdict = 'waiting' | 'failed' | 'finished'
 
@@ -104,10 +108,19 @@ function textOf(result: McpToolResult) {
   return block?.text ?? ''
 }
 
+// An app call that didn't answer in time.
+class TimedOut extends Error {
+  tool: string
+  constructor(tool: string) {
+    super(`${tool} timed out`)
+    this.tool = tool
+  }
+}
+
 async function call($: Engine, server: string, tool: string, args: Record<string, unknown>) {
   let timer: Timer | undefined
   const timeout = new Promise<never>((_, reject) => {
-    timer = $.clock.after(CALL_TIMEOUT_MS, () => reject(new Error(`${tool} timed out`)))
+    timer = $.clock.after(CALL_TIMEOUT_MS, () => reject(new TimedOut(tool)))
   })
   try {
     return await Promise.race([$.mcp.call(server, tool, args), timeout])
@@ -147,13 +160,14 @@ function replacedTitle(answer: string) {
 
 // The app keeps one file per session under %LOCALAPPDATA%\Claude-Data. Looked up
 // once, then reused; a few tries, since the session's id comes from the app.
+// Only a search of the app's folder counts as a try.
 async function findRecord($: Engine) {
   if (recordPath !== undefined || sessionId === undefined || recordSearches >= 3) return recordPath
-  recordSearches += 1
   const local = await $.env.get('LOCALAPPDATA')
   if (!local) return undefined
   const base = `${local}/Claude-Data`
   if (!(await $.fs.exists(base))) return undefined
+  recordSearches += 1
   for (const account of await $.fs.list(base)) {
     if (account.kind !== 'dir' || !account.name.startsWith('claude_')) continue
     const root = `${base}/${account.name}/claude-code-sessions`
@@ -169,18 +183,50 @@ async function findRecord($: Engine) {
   return undefined
 }
 
+// The record as last read from the file, which is read again only once it has
+// changed (a stat is far cheaper than reading and parsing it).
+async function loadRecord($: Engine) {
+  const path = await findRecord($)
+  if (path === undefined) return undefined
+  const { mtimeMs } = await $.fs.stat(path)
+  if (loaded?.mtimeMs !== mtimeMs) loaded = { mtimeMs, record: JSON.parse(await $.fs.read(path)) as AppRecord }
+  return loaded
+}
+
 // Reads the record, or with `onlyIfChanged`, only when the file has changed
-// since the last read (a stat is far cheaper than reading and parsing it).
+// since the last verdict was taken from it.
 async function readRecord($: Engine, onlyIfChanged = false) {
   try {
-    const path = await findRecord($)
-    if (path === undefined) return undefined
-    const { mtimeMs } = await $.fs.stat(path)
-    if (onlyIfChanged && mtimeMs === recordReadAt) return undefined
-    recordReadAt = mtimeMs
-    return JSON.parse(await $.fs.read(path)) as AppRecord
+    const latest = await loadRecord($)
+    if (latest === undefined) return undefined
+    if (onlyIfChanged && latest.mtimeMs === recordReadAt) return undefined
+    recordReadAt = latest.mtimeMs
+    return latest.record
   } catch {
     return undefined
+  }
+}
+
+// Whether you named this session yourself, by the app's record. The app holds
+// any other rename of such a title for your approval, and a mod's rename can't
+// carry that approval, so each try would only leave another card up.
+async function isNamedByYou($: Engine) {
+  try {
+    return (await loadRecord($))?.record.titleSource === 'user'
+  } catch {
+    return false
+  }
+}
+
+// The same for another session, from its record next to this one's.
+async function isOtherNamedByYou($: Engine, id: string) {
+  try {
+    const path = await findRecord($)
+    if (path === undefined) return false
+    const other = JSON.parse(await $.fs.read(`${path.slice(0, path.lastIndexOf('/'))}/${id}.json`)) as AppRecord
+    return other.titleSource === 'user'
+  } catch {
+    return false
   }
 }
 
@@ -275,6 +321,12 @@ async function paint($: Engine) {
       const next = dotted(renamed ?? title, status)
       renamed = undefined
       if (next === title) continue
+      if (await isNamedByYou($)) {
+        knownTitle = undefined
+        isUserTitle = true
+        await explainOnce($)
+        return
+      }
       const result = await call($, SESSIONS, 'set_session_title', { session_id: 'self', title: next })
       if (result.isError) {
         knownTitle = undefined
@@ -304,11 +356,15 @@ async function paint($: Engine) {
       // take this one straight back off.
       if (status !== undefined) await isTurnedOff($)
     } while (isRenamed || status !== wanted)
-  } catch {
-    // The app's tools aren't reachable: not connected yet in a process that has
-    // just started, or not there at all outside the desktop app.
+  } catch (error) {
     knownTitle = undefined
-    isReachable = false
+    // A rename that doesn't answer is most likely held on an approval card, for
+    // a title you set where the record couldn't say so. Trying again would
+    // only stack more cards, so this session writes no more dots.
+    if (error instanceof TimedOut && error.tool === 'set_session_title') isUserTitle = true
+    // Otherwise the app's tools aren't reachable: not connected yet in a
+    // process that has just started, or not there at all outside the desktop app.
+    else isReachable = false
   } finally {
     isWriting = false
   }
@@ -355,12 +411,20 @@ async function clearOthers($: Engine) {
   let cleared = 0
   for (const session of sessions) {
     const title = session.title?.trim() ?? ''
-    if (!DOT.test(title)) continue
-    const result = await call($, SESSIONS, 'set_session_title', {
-      session_id: session.sessionId,
-      title: title.replace(DOT, ''),
-    })
-    if (!result.isError) cleared += 1
+    // A title you named yourself is yours, a dot in front included: renaming
+    // it would put up an approval card for each one.
+    if (!DOT.test(title) || (await isOtherNamedByYou($, session.sessionId))) continue
+    try {
+      const result = await call($, SESSIONS, 'set_session_title', {
+        session_id: session.sessionId,
+        title: title.replace(DOT, ''),
+      })
+      if (!result.isError) cleared += 1
+    } catch (error) {
+      // Held on an approval card: the rest would each put up another.
+      if (error instanceof TimedOut) break
+      throw error
+    }
   }
   return cleared
 }
@@ -380,6 +444,7 @@ async function isOnScreen($: Engine) {
 
 // A finished session stays blue until you've had it on screen, then turns green.
 async function showFinished($: Engine) {
+  if (isUserTitle) return
   const turn = turnCount
   const isSeen = await isOnScreen($)
   // A new turn may have started while the check was out.

@@ -2,6 +2,12 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.6.2 - 2026-10-27
+
+- Sessions you named yourself no longer fill up with "Allow Claude to rename this session?" cards. The desktop app now holds a rename of a title you typed for your approval, where it used to refuse it, and approving can't work for a mod's rename, so every dot change and retry left another card. The mod now checks the app's record and never renames those sessions.
+- A rename the app doesn't answer is no longer tried again, so if a card does come up another way, it stays the only one.
+- `/dots off` leaves alone other sessions you named yourself, instead of putting up a card for each.
+
 ## 0.6.1 - 2026-10-27
 
 - `/dots off` run in one session now keeps the dots off in the others. Before, a session that was waiting for you to open it, or was writing its dot at that moment, could put its dot back.
