@@ -23,7 +23,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   on('command.register', () => ({ value: { command: 'dots' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('classic.PermissionRequest', () => ({}))
+  on('classic.Notification', () => ({}))
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -156,7 +156,7 @@ test('yellow while a permission card is up, back to no dot once the call returns
   await start($)
 
   await begin($)
-  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf dist' } })
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
   expect(app.title).toBe('🟡 Clean the build')
   await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
   expect(app.title).toBe('Clean the build')
@@ -206,7 +206,7 @@ test('a title you set yourself is left alone, and why is said once ever', async 
   await start($)
 
   await begin($)
-  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
   await end($, 'answer')
   await begin($)
   await end($, 'answer')

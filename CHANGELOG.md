@@ -4,7 +4,7 @@ Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
 ## 0.2.1 - 2026-10-27
 
-- The permission-card hook is now a plain pass-through, so the Claude directory's check can confirm it never answers a permission for you.
+- The mod no longer hooks permission checks, so it never takes part in a permission decision. Permission prompts still turn the dot yellow through Claude Code's notification event.
 - The README says exactly which tools the mod calls, what it reads and what it sends.
 
 ## 0.2.0 - 2026-10-27

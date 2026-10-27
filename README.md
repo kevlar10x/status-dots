@@ -68,14 +68,15 @@ It hooks these events and passes each one on unchanged:
 
 - `turn.start` and `turn.complete`: the dot goes away while Claude works, then turns green, yellow or red when the turn ends. It reads Claude's final reply only to see whether its last line is a question. Subagents' turns are skipped.
 - `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
-- `classic.PermissionRequest`: yellow while a permission card is up. It never answers the permission: the card shows as usual and your choice decides.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
+
+It has no hook on permission checks, so it never takes part in a permission decision.
 - `session.start`: registers `/dots`, and takes off a leftover dot when the dots are off.
 
 ## Limits
 
 - Tested on Windows only.
-- Yellow for questions has been seen working in the desktop app. Yellow for permission cards hasn't been seen live yet. The app's own dot turns yellow for those either way.
+- Yellow for questions has been seen working in the desktop app. Yellow for permission cards depends on Claude Code's notification event and hasn't been seen live yet. The app's own dot turns yellow for those either way.
 
 ## Uninstall
 

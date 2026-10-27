@@ -165,14 +165,9 @@ export const register: Register = on => {
     return result
   })
 
-  // A permission card is up, for the main loop or a subagent. The hook only
-  // marks the dot and passes the event on: the card and your answer are untouched.
-  on('classic.PermissionRequest', async ($, e, next) => {
-    await show($, 'waiting')
-
-    return next(e)
-  })
-
+  // A permission prompt or a question is waiting for you. There's no hook on
+  // the permission check itself: the Claude directory accepts one there only
+  // when it does nothing but pass the event on.
   on('classic.Notification', async ($, e, next) => {
     if (e.notification_type === 'permission_prompt' || e.notification_type === 'elicitation_dialog') {
       await show($, 'waiting')
