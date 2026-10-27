@@ -1,0 +1,13 @@
+{
+  "name": "status-dots",
+  "version": "0.1.0",
+  "description": "Puts a colored dot in front of each session's title in the Claude desktop app's sidebar: grey while Claude works, yellow while it waits for you, green when it's done, red when an error stopped it.",
+  "author": { "name": "kevlar10x" },
+  "license": "MIT",
+  "homepage": "https://github.com/kevlar10x/status-dots",
+  "repository": "https://github.com/kevlar10x/status-dots",
+  "documentationUrl": "https://github.com/kevlar10x/status-dots#readme",
+  "supportUrl": "https://github.com/kevlar10x/status-dots/issues",
+  "privacyPolicyUrl": "https://github.com/kevlar10x/status-dots#privacy",
+  "keywords": ["sessions", "sidebar", "status", "desktop", "mod"]
+}

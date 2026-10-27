@@ -1,0 +1,6 @@
+{
+  "name": "kevlar10x-status-dots",
+  "owner": { "name": "kevlar10x" },
+  "description": "status-dots, a Claude Code mod by kevlar10x",
+  "plugins": [{ "name": "status-dots", "source": "./" }]
+}
