@@ -6,6 +6,16 @@ Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
 - The README's screenshot now shows green and yellow dots, not only green.
 
+## 0.6.0 - 2026-10-27
+
+- Faster dots. The mod no longer makes a turn or a question card wait while it writes the title, and once it knows a session's title, a dot change is a single call to the app.
+- A dot that couldn't be written while the app's tools were still connecting, in a session that had just started, is tried again every second. Before, it stayed wrong for that whole turn.
+- Blue turns green within a second of opening a session. A blue dot left alone checks less often over time: every 4 seconds, then every 15 seconds after about 5 minutes.
+- After a turn, the app's file is read again only when it has changed.
+- A session that stopped in the middle of a turn loses its white dot after 10 seconds instead of 20.
+- Sessions you named yourself, and terminal sessions, no longer try to write a dot on every turn.
+- If something else renames a session between two dot changes, the dot moves onto the new name instead of bringing the old one back.
+
 ## 0.5.1 - 2026-10-27
 
 - A white dot left by a session that stopped in the middle of a turn now goes away when the session starts again and no turn picks up.

@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const USER_TITLE_REFUSAL =
@@ -21,6 +21,15 @@ type App = {
   record?: Record<string, unknown>
   // Renames of this session never answer, as a stuck call wouldn't.
   isStuck?: boolean
+  // How many times the mod read this session from the app.
+  reads?: number
+  // Every call the mod made to the app, answered or not.
+  calls?: number
+  // Renames answer without saying which title they replaced.
+  isTerse?: boolean
+  // How many times the mod read the record file, and asked if the app shows the session.
+  fileReads?: number
+  layoutChecks?: number
 }
 
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], isError })
@@ -28,10 +37,22 @@ const text = (value: string, isError = false) => ({ content: [{ type: 'text' as 
 const DATA = 'C:/Users/me/AppData/Local/Claude-Data'
 const RECORD = `${DATA}/claude_abc/claude-code-sessions/org/acct/local_1.json`
 
+// The clock of the test that's running; the helpers below settle it, since the
+// mod's hooks don't wait for the title to be written.
+let current: MockClock
+
+// Lets a few rounds of pending work run, inside a hook where the clock can't settle.
+const flush = async () => {
+  for (let i = 0; i < 50; i += 1) await Promise.resolve()
+}
+
+const RENAME = 'mcp__ccd_session_mgmt__set_session_title'
+
 // Stands in for the engine, the desktop app's session tools and its data folder.
 // Returns the mocked clock.
 function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   const clock = mock.clock(on, { now: 0 })
+  current = clock
   mock.env(on, { LOCALAPPDATA: 'C:/Users/me/AppData/Local' })
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   // The engine may hand paths over in Windows form.
@@ -46,7 +67,16 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   }))
   on('fs.read', (_, e) => {
     if (norm(e.path) !== RECORD || app.record === undefined) throw new Error(`ENOENT ${e.path}`)
+    app.fileReads = (app.fileReads ?? 0) + 1
     return { value: JSON.stringify(app.record) }
+  })
+  // The file's time changes whenever the record does.
+  on('fs.stat', (_, e) => {
+    if (norm(e.path) !== RECORD || app.record === undefined) throw new Error(`ENOENT ${e.path}`)
+    const json = JSON.stringify(app.record)
+    let mtimeMs = 0
+    for (let i = 0; i < json.length; i += 1) mtimeMs = (mtimeMs * 31 + json.charCodeAt(i)) % 1_000_000_007
+    return { value: { kind: 'file' as const, size: json.length, mtimeMs, isLink: false } }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'dots' } }))
@@ -57,16 +87,24 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     toasts.push(e.text)
     return { value: undefined }
   })
-  // The tool itself: notes the title while it runs.
-  on('tool.call', () => {
+  // The tool itself: notes the title while it runs, once the mod has had a
+  // moment to write it. Claude's own rename of this session renames it.
+  on('tool.call', async (_, e) => {
+    if (e.tool === RENAME) app.title = String((e as { title?: unknown }).title)
+    await flush()
     seen.push(app.title ?? '')
     return { result: 'ok' }
   })
   on('mcp.call', (_, e) => {
+    app.calls = (app.calls ?? 0) + 1
     if (app.isMissing || app.isConnecting) throw new Error(`no MCP server named ${e.server}`)
-    if (e.tool === 'get_session') return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
+    if (e.tool === 'get_session') {
+      app.reads = (app.reads ?? 0) + 1
+      return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
+    }
     if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
     if (e.tool === 'get_window_layout') {
+      app.layoutChecks = (app.layoutChecks ?? 0) + 1
       return { value: text(JSON.stringify({ this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
     }
     const other = app.others?.find(session => session.sessionId === e.args.session_id)
@@ -77,18 +115,26 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (app.isStuck) return new Promise<never>(() => undefined)
     const title = String(e.args.title)
     if (app.source === 'user' && title !== app.title) return { value: text(USER_TITLE_REFUSAL, true) }
+    const was = app.title
     app.title = title
     app.source = 'tool'
     app.renames.push(title)
-    return { value: text(`Renamed this session to "${title}".`) }
+    const replaced = was === undefined || app.isTerse ? '' : ` (was ${JSON.stringify(was)})`
+    return { value: text(`Renamed this session to ${JSON.stringify(title)}${replaced}.`) }
   })
   return clock
 }
 
-const start = ($: Engine) => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-const begin = ($: Engine, agentId?: string) => $.turn.start({ text: 'go', turnId: 't1', ...(agentId ? { agentId } : {}) })
-const end = ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string, answer = 'Done.') =>
-  $.turn.complete({
+const start = async ($: Engine) => {
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await current.settle()
+}
+const begin = async ($: Engine, agentId?: string) => {
+  await $.turn.start({ text: 'go', turnId: 't1', ...(agentId ? { agentId } : {}) })
+  await current.settle()
+}
+const end = async ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string, answer = 'Done.') => {
+  const result = await $.turn.complete({
     answer: reason === 'answer' ? answer : '',
     durationMs: 10,
     isAborted: reason === 'aborted',
@@ -96,8 +142,22 @@ const end = ($: Engine, reason: 'answer' | 'aborted' | 'error', agentId?: string
     reason,
     ...(agentId ? { agentId } : {}),
   })
-const dots = ($: Engine, args: string) =>
-  $.command.run({ command: 'dots', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  await current.settle()
+  return result
+}
+const dots = async ($: Engine, args: string) => {
+  const result = await $.command.run({ command: 'dots', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  await current.settle()
+  return result
+}
+const tool = async ($: Engine, input: Record<string, unknown> & { tool: string }) => {
+  await $.tool.call(input as Parameters<Engine['tool']['call']>[0])
+  await current.settle()
+}
+const notify = async ($: Engine) => {
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+  await current.settle()
+}
 
 test('white while working, green when the turn ends with an answer', async ($, on) => {
   mock.store(on)
@@ -120,13 +180,13 @@ test('yellow when the turn ends by asking you something', async ($, on) => {
   await start($)
 
   await begin($)
-  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', actions: [] })
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', actions: [] })
   await end($, 'answer')
   expect(app.title).toBe('🟡 Ship the release')
 
   // A recap alone asks nothing: green.
   await begin($)
-  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.' })
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.' })
   await end($, 'answer')
   expect(app.title).toBe('🟢 Ship the release')
 })
@@ -226,9 +286,9 @@ test('yellow while a permission card is up, back to white once the call returns'
   await start($)
 
   await begin($)
-  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+  await notify($)
   expect(app.title).toBe('🟡 Clean the build')
-  await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
+  await tool($, { tool: 'Bash', command: 'rm -rf dist' })
   expect(app.title).toBe('⚪ Clean the build')
 })
 
@@ -240,7 +300,7 @@ test('yellow while a question waits for your answer', async ($, on) => {
   await start($)
 
   await begin($)
-  await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
+  await tool($, { tool: 'AskUserQuestion', questions: [] })
   expect(seen).toEqual(['🟡 Pick a palette'])
   expect(app.title).toBe('⚪ Pick a palette')
 })
@@ -251,7 +311,7 @@ test('an answered question clears its yellow dot even when the mod loaded mid-tu
   engine(on, app)
   await start($)
 
-  await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
+  await tool($, { tool: 'AskUserQuestion', questions: [] })
   expect(app.title).toBe('⚪ Loaded late')
   expect(app.renames).toEqual(['🟡 Loaded late', '⚪ Loaded late'])
 })
@@ -276,7 +336,7 @@ test('a title you set yourself is left alone, and why is said once ever', async 
   await start($)
 
   await begin($)
-  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+  await notify($)
   await end($, 'answer')
   await begin($)
   await end($, 'answer')
@@ -455,7 +515,7 @@ test('a question in the end-of-turn box stays yellow whatever the summary says',
   await start($)
 
   await begin($)
-  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
   await end($, 'answer')
   app.record = summed('completed', 'a2', { description: 'Built it.', needsUser: 'Publish it?' })
   await clock.advance(2_000)
@@ -553,13 +613,149 @@ test('a stuck app call times out, and the dots after it still work', async ($, o
   await start($)
 
   app.isStuck = true
-  const stuck = begin($)
-  await clock.advance(11_000)
-  await stuck
-  app.isStuck = false
+  // The hook doesn't wait for the stuck write; the turn goes on.
   await begin($)
+  await clock.advance(10_000)
+  app.isStuck = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('⚪ Stuck once')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Stuck once')
+})
+
+test('once the title is known, a dot change is a single call to the app', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'One call', source: 'tool', renames: [] }
+  engine(on, app)
+  await start($)
+  const reads = app.reads
+
+  await begin($)
+  await end($, 'answer')
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 One call')
+  expect(app.reads).toBe(reads)
+})
+
+test('a rename in between keeps the new name and gets the dot', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Old name', source: 'tool', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  // Renamed by something the mod doesn't see, another session say.
+  app.title = 'New name'
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 New name')
+})
+
+test('Claude renaming this session keeps the new name and its dot', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Draft', source: 'tool', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: RENAME, session_id: 'self', title: 'Release notes' })
+  expect(app.title).toBe('⚪ Release notes')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Release notes')
+})
+
+test("a write that can't reach the app yet is tried again a second later", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Cold start', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  app.isConnecting = true
+  await begin($)
+  expect(app.title).toBe('Cold start')
+  app.isConnecting = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('⚪ Cold start')
+})
+
+test('blue turns green within a second of opening the session', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Quick look', source: 'tool', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Quick look')
+  app.isOffScreen = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('🟢 Quick look')
+})
+
+test('without an app to reach, a dot change soon costs a single try', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Terminal', source: 'auto', renames: [], isMissing: true }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(31_000)
+  for (let turn = 0; turn < 2; turn += 1) {
+    await begin($)
+    await end($, 'answer')
+    await clock.advance(15_000)
+  }
+
+  const before = app.calls ?? 0
+  await begin($)
+  await clock.advance(15_000)
+  expect((app.calls ?? 0) - before).toBe(1)
+})
+
+test("a rename answer that doesn't name the old title means a fresh read next time", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Terse', source: 'tool', renames: [], isTerse: true }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  const reads = app.reads ?? 0
+  await end($, 'answer')
+  expect(app.reads).toBe(reads + 1)
+  expect(app.title).toBe('🟢 Terse')
+})
+
+test('a blue dot checks less often the longer it stays blue', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Left alone', source: 'tool', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+
+  const first = app.layoutChecks ?? 0
+  await clock.advance(20_000)
+  expect((app.layoutChecks ?? 0) - first).toBe(20)
+  await clock.advance(10 * 60_000)
+  const later = app.layoutChecks ?? 0
+  await clock.advance(60_000)
+  expect((app.layoutChecks ?? 0) - later).toBe(4)
+  expect(app.title).toBe('🔵 Left alone')
+})
+
+test("after a turn the app's file is only read again when it has changed", async ($, on) => {
+  mock.store(on)
+  // A record whose summary of the latest reply never comes.
+  const app: App = { title: 'No summary', source: 'tool', renames: [], record: { lastAssistantUuid: 'a2' } }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  // The app writes the file once as the turn ends, then leaves it.
+  app.record = { lastAssistantUuid: 'a3' }
+
+  const reads = app.fileReads ?? 0
+  await clock.advance(30_000)
+  expect((app.fileReads ?? 0) - reads).toBe(1)
+  expect(app.title).toBe('🟢 No summary')
 })
 
 test('outside the desktop app it does nothing and breaks nothing', async ($, on) => {
@@ -569,7 +765,7 @@ test('outside the desktop app it does nothing and breaks nothing', async ($, on)
   await start($)
 
   await begin($)
-  await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
+  await tool($, { tool: 'AskUserQuestion', questions: [] })
   const result = await end($, 'answer')
   expect(result.text).toBe('')
   expect(app.renames).toEqual([])

@@ -7,10 +7,13 @@ import type { EngineInterface as Engine, McpToolResult, Register, Timer } from '
 // a refusal stopped Claude, yellow when something on screen waits for you (a
 // question, a plan or a permission card, or a question in the next-step box),
 // blue when it finished while you weren't looking, green once you've seen it
-// and it needs nothing from you, white while Claude works. The desktop app gives mods no way to recolor
-// its own sidebar dot, so the title carries it. A title you typed yourself is
-// yours: the app won't let anything but an approved rename change it, so that
-// session gets no dot.
+// and it needs nothing from you, white while Claude works. The desktop app
+// gives mods no way to recolor its own sidebar dot, so the title carries it. A
+// title you typed yourself is yours: the app won't let anything but an
+// approved rename change it, so that session gets no dot.
+//
+// Hooks never wait for the title: they set the dot they want and pass their
+// event straight on, and the title catches up a moment later.
 
 type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 
@@ -21,13 +24,24 @@ const DOTS: Record<Status, string> = { working: '⚪', waiting: '🟡', fresh: '
 const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
 const WINDOW = 'ccd_window'
-// How often a blue session checks whether you've opened it.
-const SEEN_CHECK_MS = 5000
+// A blue session checks whether you've opened it every second at first, since
+// that's when you're most likely to, then every 4 seconds for about 5 minutes,
+// then every 15 seconds for as long as it stays blue.
+const SEEN_STEPS = [
+  { checks: 20, everyMs: 1000 },
+  { checks: 70, everyMs: 4000 },
+  { checks: Infinity, everyMs: 15000 },
+]
+// A write that couldn't reach the app (its tools still connecting, say) is
+// tried again every second, ten times.
+const WRITE_RETRY_MS = 1000
+const WRITE_TRIES = 10
+const UNREACHABLE_RUNS = 2
 // How often, and how many times, a starting session retries reaching the app.
-const START_RETRY_MS = 5000
-const START_TRIES = 6
+const START_RETRY_MS = 1000
+const START_TRIES = 30
 // How long a starting session waits for a turn before calling a white dot stale.
-const STALE_WORKING_MS = 20000
+const STALE_WORKING_MS = 10000
 // How often, and how many times, a finished turn looks for the app's verdict.
 const VERDICT_CHECK_MS = 2000
 const VERDICT_TRIES = 15
@@ -38,10 +52,18 @@ const CALL_TIMEOUT_MS = 10000
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
+// The app's rename tool, as Claude calls it.
+const RENAME = `mcp__${SESSIONS}__set_session_title`
 
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
 let isWriting = false
+// The title as last read or written, so a dot change is one call, not two.
+let knownTitle: string | undefined
+let writeRetry: Timer | undefined
+let writeTries = 0
+// Changes in a row whose writes never reached the app, retries and all.
+let unreachableRuns = 0
 // The title is one you set, which the app keeps.
 let isUserTitle = false
 let isOff = false
@@ -50,6 +72,7 @@ let questions = 0
 let isAsking = false
 // While the dot is blue: the next check for whether you've opened the session.
 let seenCheck: Timer | undefined
+let seenChecks = 0
 // A turn has started in this process, so the start check has nothing left to do.
 let hasTurned = false
 // Counts the main loop's turns, so a check started for one turn knows when another began.
@@ -59,6 +82,8 @@ let verdictCheck: Timer | undefined
 let sessionId: string | undefined
 let recordPath: string | undefined
 let recordSearches = 0
+// When the record file was last read, by its modification time.
+let recordReadAt: number | undefined
 
 // What the app keeps about this session in its data folder: whether the last
 // turn's next-step box asked you something, and whether an error ended it. The
@@ -96,11 +121,28 @@ async function titleOf($: Engine) {
   if (result.isError) return undefined
   const session = JSON.parse(textOf(result)) as { title?: string; sessionId?: string }
   sessionId ??= session.sessionId
-  return session.title?.trim() ?? ''
+  knownTitle = session.title?.trim() ?? ''
+  return knownTitle
 }
 
 function statusOf(title: string): Status | undefined {
   return (Object.keys(DOTS) as Status[]).find(status => title.startsWith(`${DOTS[status]} `))
+}
+
+function dotted(title: string, status: Status | undefined) {
+  const bare = title.replace(DOT, '')
+  return status === undefined ? bare : `${DOTS[status]} ${bare}`
+}
+
+// The app answers a rename with `Renamed this session to "new" (was "old").`
+function replacedTitle(answer: string) {
+  const match = /\(was (".*")\)\.?\s*$/su.exec(answer)
+  if (match === null) return undefined
+  try {
+    return JSON.parse(match[1] ?? '') as string
+  } catch {
+    return undefined
+  }
 }
 
 // The app keeps one file per session under %LOCALAPPDATA%\Claude-Data. Looked up
@@ -127,10 +169,16 @@ async function findRecord($: Engine) {
   return undefined
 }
 
-async function readRecord($: Engine) {
+// Reads the record, or with `onlyIfChanged`, only when the file has changed
+// since the last read (a stat is far cheaper than reading and parsing it).
+async function readRecord($: Engine, onlyIfChanged = false) {
   try {
     const path = await findRecord($)
-    return path === undefined ? undefined : (JSON.parse(await $.fs.read(path)) as AppRecord)
+    if (path === undefined) return undefined
+    const { mtimeMs } = await $.fs.stat(path)
+    if (onlyIfChanged && mtimeMs === recordReadAt) return undefined
+    recordReadAt = mtimeMs
+    return JSON.parse(await $.fs.read(path)) as AppRecord
   } catch {
     return undefined
   }
@@ -150,14 +198,14 @@ function verdictOf(record: AppRecord): Verdict | undefined {
   return 'finished'
 }
 
-async function applyVerdict($: Engine, verdict: Verdict) {
+function applyVerdict($: Engine, verdict: Verdict) {
   if (verdict === 'finished') {
-    if (wanted !== 'done' && wanted !== 'fresh') await showFinished($)
+    if (wanted !== 'done' && wanted !== 'fresh') void showFinished($)
     return
   }
   if (wanted === verdict) return
   stopWatching()
-  await show($, verdict)
+  show($, verdict)
 }
 
 // The app sums up a turn a few seconds after it ends. Until then the dot comes
@@ -168,10 +216,10 @@ function followVerdict($: Engine, triesLeft = VERDICT_TRIES) {
   verdictCheck = $.clock.after(VERDICT_CHECK_MS, async () => {
     verdictCheck = undefined
     if (turn !== turnCount) return
-    const record = await readRecord($)
+    const record = await readRecord($, true)
     const verdict = record === undefined ? undefined : verdictOf(record)
     if (turn !== turnCount) return
-    if (verdict !== undefined) return applyVerdict($, verdict).catch(() => undefined)
+    if (verdict !== undefined) return applyVerdict($, verdict)
     if (triesLeft > 1) followVerdict($, triesLeft - 1)
   })
 }
@@ -182,39 +230,81 @@ function stopFollowing() {
 }
 
 // Writes the wanted dot into the title, one write at a time. A change asked for
-// while a write is out is picked up when that write returns.
+// while a write is out is picked up when that write returns. Never throws.
 async function paint($: Engine) {
   if (isWriting || isUserTitle) return
   isWriting = true
+  let isReachable = true
   try {
     let status: Status | undefined
+    let written: string | undefined
+    let isRenamed = false
+    let redos = 0
     do {
       status = wanted
-      const title = await titleOf($)
+      isRenamed = false
+      const title = knownTitle ?? (await titleOf($))
       if (title === undefined) return
-      const bare = title.replace(DOT, '')
       // No title yet. The app names a new session from its first prompt, and a
       // title written before that would stop it from doing so.
-      if (bare === '') return
-      const next = status === undefined ? bare : `${DOTS[status]} ${bare}`
-      if (next !== title) {
-        const result = await call($, SESSIONS, 'set_session_title', { session_id: 'self', title: next })
-        if (result.isError) {
-          if (/set by the user/.test(textOf(result))) {
-            isUserTitle = true
-            await explainOnce($)
-          }
-          return
-        }
+      if (title.replace(DOT, '') === '') {
+        knownTitle = undefined
+        return
       }
-    } while (status !== wanted)
+      const next = dotted(title, status)
+      if (next === title) continue
+      const result = await call($, SESSIONS, 'set_session_title', { session_id: 'self', title: next })
+      if (result.isError) {
+        knownTitle = undefined
+        if (/set by the user/.test(textOf(result))) {
+          isUserTitle = true
+          await explainOnce($)
+        }
+        return
+      }
+      knownTitle = next
+      // The app says which title it replaced. If that isn't the one this write
+      // was based on (nor this paint's own last write), the session was renamed
+      // in between, so the dot goes onto that name instead of bringing the old
+      // one back. Once per paint, so a busy rename can't keep it looping.
+      const replaced = replacedTitle(textOf(result))
+      if (replaced === undefined) {
+        // The answer doesn't say (the app may word it differently one day), so
+        // read the title again before the next write rather than trust the cache.
+        knownTitle = undefined
+      } else if (replaced !== title && replaced !== written && redos < 1) {
+        knownTitle = replaced
+        isRenamed = true
+        redos += 1
+      }
+      written = next
+    } while (isRenamed || status !== wanted)
   } catch {
     // The app's tools aren't reachable: not connected yet in a process that has
-    // just started, or not there at all outside the desktop app. Only this
-    // write is skipped; the next change tries again.
+    // just started, or not there at all outside the desktop app.
+    knownTitle = undefined
+    isReachable = false
   } finally {
     isWriting = false
   }
+  if (isReachable) unreachableRuns = 0
+  else retryPaint($)
+}
+
+// Retries while the app's tools may still be connecting. After a few changes
+// that never got through (a terminal session has no app to reach), each change
+// is tried once and no more.
+function retryPaint($: Engine) {
+  if (writeTries >= WRITE_TRIES || unreachableRuns >= UNREACHABLE_RUNS) {
+    if (writeTries >= WRITE_TRIES) unreachableRuns += 1
+    return
+  }
+  writeTries += 1
+  writeRetry?.cancel()
+  writeRetry = $.clock.after(WRITE_RETRY_MS, () => {
+    writeRetry = undefined
+    void paint($)
+  })
 }
 
 // Said once, ever, so a session without a dot isn't a mystery.
@@ -224,11 +314,11 @@ async function explainOnce($: Engine) {
   $.ui.toast("status-dots: you named this session yourself, so it gets no dot. Have Claude rename it once (you approve) and it will.")
 }
 
-async function show($: Engine, status: Status | undefined) {
-  // Another session may have turned the dots off since.
-  isOff = (await $.store.get('isOff')) === true
+// Sets the dot this session should show and starts writing it.
+function show($: Engine, status: Status | undefined) {
   wanted = isOff ? undefined : status
-  await paint($)
+  writeTries = 0
+  void paint($)
 }
 
 // Takes the dot off every other session the app lists, archived ones too, so
@@ -265,26 +355,37 @@ async function isOnScreen($: Engine) {
 
 // A finished session stays blue until you've had it on screen, then turns green.
 async function showFinished($: Engine) {
-  if (await isOnScreen($)) return show($, 'done')
-  await show($, 'fresh')
-  if (wanted === 'fresh') watchUntilSeen($)
+  const turn = turnCount
+  const isSeen = await isOnScreen($)
+  // A new turn may have started while the check was out.
+  if (turn !== turnCount) return
+  show($, isSeen ? 'done' : 'fresh')
+  if (!isSeen) watchUntilSeen($, true)
 }
 
-// Checks every few seconds while the dot is blue, and stops once it isn't.
-function watchUntilSeen($: Engine) {
+function seenDelay() {
+  let left = seenChecks
+  for (const step of SEEN_STEPS) {
+    if (left < step.checks) return step.everyMs
+    left -= step.checks
+  }
+  return SEEN_STEPS[SEEN_STEPS.length - 1]?.everyMs ?? 15000
+}
+
+// Checks while the dot is blue, less often the longer it stays blue, and stops
+// once it isn't.
+function watchUntilSeen($: Engine, isNew = false) {
+  if (isNew) seenChecks = 0
   seenCheck?.cancel()
-  seenCheck = $.clock.after(SEEN_CHECK_MS, async () => {
+  seenCheck = $.clock.after(seenDelay(), async () => {
     seenCheck = undefined
+    seenChecks += 1
     if (wanted !== 'fresh') return
     const isSeen = await isOnScreen($)
     // A turn may have started while the check was out.
     if (wanted !== 'fresh') return
-    if (!isSeen) return watchUntilSeen($)
-    try {
-      await show($, 'done')
-    } catch {
-      // The store couldn't be read; the next turn sets the dot again.
-    }
+    if (isSeen) show($, 'done')
+    else watchUntilSeen($)
   })
 }
 
@@ -299,8 +400,8 @@ function stopWatching() {
 // process stopped, or the app couldn't be reached then). A yellow dot left by a
 // closed app stays, since the session still needs you, and a blue one turns
 // green once you've opened the session. In a process that has just started the
-// app's tools may not be connected yet, so the check tries again a few times,
-// until a turn starts and takes over.
+// app's tools may not be connected yet, so the check tries again every second
+// for a while, until a turn starts and takes over.
 async function checkAtStart($: Engine, triesLeft: number) {
   if (hasTurned) return
   let title: string
@@ -310,33 +411,44 @@ async function checkAtStart($: Engine, triesLeft: number) {
     if (triesLeft > 0) $.clock.after(START_RETRY_MS, () => void checkAtStart($, triesLeft - 1).catch(() => undefined))
     return
   }
+  if (hasTurned) return
   if (isOff) {
-    if (DOT.test(title)) await show($, undefined)
+    if (DOT.test(title)) show($, undefined)
     return
   }
   wanted = statusOf(title)
   const record = await readRecord($)
   const verdict = record === undefined ? undefined : verdictOf(record)
   if (hasTurned) return
-  if (verdict !== undefined) await applyVerdict($, verdict)
+  if (verdict === 'finished' && wanted !== 'done' && wanted !== 'fresh') return showFinished($)
+  if (verdict !== undefined) applyVerdict($, verdict)
   // A white dot with no turn behind it is left from a run that stopped mid-turn:
   // the process ended, or the app closed without picking the turn up again. A
   // turn that resumes takes over within moments; if none does, the dot goes.
   if (wanted === 'working') {
     $.clock.after(STALE_WORKING_MS, () => {
-      if (!hasTurned && wanted === 'working') void show($, undefined).catch(() => undefined)
+      if (!hasTurned && wanted === 'working') show($, undefined)
     })
     return
   }
-  if (wanted !== 'fresh' || hasTurned) return
-  if (await isOnScreen($)) await show($, 'done')
-  else watchUntilSeen($)
+  if (wanted !== 'fresh') return
+  if (await isOnScreen($)) {
+    if (!hasTurned && wanted === 'fresh') show($, 'done')
+  } else watchUntilSeen($, true)
 }
 
 // Back to working once nothing waits on you. Tool calls only return inside a
 // turn, so this needs no turn of its own to have been seen.
-async function resume($: Engine) {
-  if (questions === 0 && wanted === 'waiting') await show($, 'working')
+function resume($: Engine) {
+  if (questions === 0 && wanted === 'waiting') show($, 'working')
+}
+
+// Another session may have turned the dots off since this one last looked.
+async function refreshOff($: Engine) {
+  const isOffNow = (await $.store.get('isOff')) === true
+  if (isOffNow === isOff) return
+  isOff = isOffNow
+  show($, wanted)
 }
 
 export const register: Register = on => {
@@ -344,12 +456,12 @@ export const register: Register = on => {
     await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots on or off' })
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
-    await checkAtStart($, START_TRIES)
+    void checkAtStart($, START_TRIES).catch(() => undefined)
 
     return result
   })
 
-  on('turn.start', async ($, e, next) => {
+  on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) {
       questions = 0
       isAsking = false
@@ -357,9 +469,8 @@ export const register: Register = on => {
       stopFollowing()
       hasTurned = true
       turnCount += 1
-      // You may have handed the title back since (an approved rename by Claude).
-      isUserTitle = false
-      await show($, 'working')
+      show($, 'working')
+      void refreshOff($).catch(() => undefined)
     }
 
     return next(e)
@@ -371,9 +482,9 @@ export const register: Register = on => {
     questions = 0
     // An answer whose next-step box asks you something leaves it your turn. A
     // question only in the reply's text doesn't: nothing on screen waits for you.
-    if (e.reason === 'answer' && !isAsking) await showFinished($)
+    if (e.reason === 'answer' && !isAsking) void showFinished($)
     // Stopped by you: no dot, since you were there to see it.
-    else await show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
+    else show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
     if (e.reason === 'answer') followVerdict($)
 
     return result
@@ -382,16 +493,17 @@ export const register: Register = on => {
   // A permission prompt or a question is waiting for you. There's no hook on
   // the permission check itself: the Claude directory accepts one there only
   // when it does nothing but pass the event on.
-  on('classic.Notification', async ($, e, next) => {
+  on('classic.Notification', ($, e, next) => {
     if (e.notification_type === 'permission_prompt' || e.notification_type === 'elicitation_dialog') {
-      await show($, 'waiting')
+      show($, 'waiting')
     }
 
     return next(e)
   }).catch(($, e, next) => next(e))
 
   // A question or a plan to approve waits for you until its call returns; any
-  // call returning moves an answered permission card back to working.
+  // call returning moves an answered permission card back to working. When
+  // Claude renames this session, the mod reads the new name before its next dot.
   on('tool.call', async ($, e, next) => {
     if (e.tool === WRAP_UP && e.agentId === undefined) {
       const ask = (e as { ask?: unknown }).ask
@@ -400,13 +512,21 @@ export const register: Register = on => {
     const isQuestion = ASKS.has(e.tool)
     if (isQuestion) {
       questions += 1
-      await show($, 'waiting')
+      show($, 'waiting')
     }
     try {
       return await next(e)
     } finally {
       if (isQuestion) questions -= 1
-      await resume($)
+      if (e.tool === RENAME) {
+        const target = (e as { session_id?: unknown }).session_id
+        if (target === 'self' || target === sessionId) {
+          knownTitle = undefined
+          isUserTitle = false
+          show($, wanted)
+        }
+      }
+      resume($)
     }
   }).catch(($, e, next) => next(e))
 
@@ -417,7 +537,7 @@ export const register: Register = on => {
     if (isOff) {
       stopWatching()
       stopFollowing()
-      await show($, undefined)
+      show($, undefined)
       let cleared = 0
       try {
         cleared = await clearOthers($)

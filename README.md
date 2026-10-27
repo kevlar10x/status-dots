@@ -49,15 +49,16 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 
 ## Things to know
 
-- Sessions you named yourself get no dot. The app won't let anything change a title you typed unless you approve it, and a mod has no way to ask. If you want a dot on one of them, ask Claude to rename it and approve that once. The mod explains this in a short note the first time it happens.
+- Sessions you named yourself get no dot. The app won't let anything change a title you typed unless you approve it, and a mod has no way to ask. If you want a dot on one of them, ask Claude in that session to rename it and approve that once. The mod explains this in a short note the first time it happens.
 - A new session gets its first dot when Claude finishes its first turn. The mod leaves a title alone until the app has named the session, so the app's naming still works.
 - Once a session has a dot, the app counts its title as set and stops renaming that session on its own, for example to a pull request's title.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
 - Yellow means something in the session is waiting for you on screen. A reply that only asks in its text, or that the app's own summary reads as waiting on you, stays green or blue, since there's nothing there to answer.
 - A few seconds after a turn ends, the mod checks the app's record of it. That puts back a question in the next-step box, or an error, that the mod missed when the turn ended.
-- A session that finishes while it's on screen goes straight to green. A blue one checks every 5 seconds whether you've opened it, and only while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
+- Dots change within a moment of what they show, and the mod never makes Claude wait for a title change.
+- A session that finishes while it's on screen goes straight to green. A blue one checks whether you've opened it every second for the first 20 seconds, then every 4 seconds, and every 15 seconds once it has stayed blue for about 5 minutes. It only checks while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
 - When a session starts again, its dot is matched to the app's record of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
-- If a session stopped in the middle of a turn (its process ended, or the app closed and didn't pick the turn up again), its white dot goes when the session starts and no turn follows within 20 seconds.
+- If a session stopped in the middle of a turn (its process ended, or the app closed and didn't pick the turn up again), its white dot goes when the session starts and no turn follows within 10 seconds.
 - The title moves over a little when its dot comes and goes.
 
 ## Privacy
@@ -68,14 +69,16 @@ The mod reads this session's title from the desktop app and writes it back throu
 
 It calls the desktop app's session tools (`ccd_session_mgmt`) without Claude asking for them:
 
-- `get_session` and `set_session_title` for the session it runs in, when the dot changes.
+- `set_session_title` for the session it runs in, when the dot changes, and `get_session` only when it doesn't know the current title (when the session starts, or after a rename it couldn't follow).
 - `list_sessions` and `set_session_title` for your other sessions, only when you run `/dots off`.
 
-While a session's dot is blue, it also calls `get_window_layout` from the app's window tools (`ccd_window`) every 5 seconds, to see whether the session is on screen.
+When a turn ends, and while a session's dot is blue, it also calls `get_window_layout` from the app's window tools (`ccd_window`) to see whether the session is on screen: every second at first, then every 4 and later every 15 seconds.
+
+A write that can't reach the app (its tools still connecting, say) is tried again every second for up to 10 seconds. Where there's no app to reach, it soon stops retrying.
 
 A call to the app that hasn't answered after 10 seconds is dropped, so one stuck call can't stop the dots in that session.
 
-It reads one file: this session's record in the app's data folder, every 2 seconds for up to 30 seconds after a turn ends (until the app's summary is in), and once when the session starts.
+It reads one file: this session's record in the app's data folder, once when the session starts, and after a turn ends until the app's summary is in (it looks every 2 seconds for up to 30 seconds, checks the file's time first, and reads it only when it has changed).
 
 Those are the only tools it calls. It runs no commands or programs and fetches nothing from the network. All it sends is a session title, with the dot added or taken off, to the desktop app on your computer.
 
