@@ -28,6 +28,8 @@ type App = {
   cards?: number
   // The app's records of the other sessions, by session id.
   otherRecords?: Record<string, Record<string, unknown>>
+  // Every file the mod read, when a test wants to know.
+  readPaths?: string[]
   // How many times the mod read this session from the app.
   reads?: number
   // Every call the mod made to the app, answered or not.
@@ -102,6 +104,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       : [],
   }))
   on('fs.read', (_, e) => {
+    app.readPaths?.push(norm(e.path))
     const record = recordAt(e.path)
     if (record === undefined) throw new Error(`ENOENT ${e.path}`)
     if (norm(e.path) === RECORD) app.fileReads = (app.fileReads ?? 0) + 1
@@ -819,6 +822,18 @@ test('without the app record to go by, a title you named yourself costs at most 
   await end($, 'answer')
   await clock.advance(60_000)
   expect(app.cards).toBe(1)
+})
+
+test("/dots off doesn't build a file path from a session id of an unexpected shape", async ($, on) => {
+  mock.store(on)
+  const others = [{ sessionId: '../../evil', title: '🟢 Odd id' }]
+  const app: App = { title: 'This one', source: 'tool', renames: [], others, record: { titleSource: 'tool' }, otherRecords: {}, readPaths: [] }
+  engine(on, app)
+  await start($)
+
+  await dots($, 'off')
+  expect(app.readPaths?.some(path => path.includes('evil'))).toBe(false)
+  expect(others[0]?.title).toBe('🟢 Odd id')
 })
 
 test('/dots off leaves alone other sessions you named yourself', async ($, on) => {

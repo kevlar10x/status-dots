@@ -2,6 +2,11 @@
 
 Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
 
+## 0.6.4 - 2026-10-28
+
+- Before `/dots off` looks up another session's file, the mod checks that the session's id has the app's usual shape, so an odd id can't point it at some other file.
+- The README now says the mod isn't made by or affiliated with Anthropic, and lists exactly what it reads from the app's session file.
+
 ## 0.6.3 - 2026-10-27
 
 - A question in the next-step box keeps the dot yellow again. The app records that question only when it stops the work, so a question with buttons that didn't stop it was read as finished a few seconds later, and the dot went blue or green while the question was still there.

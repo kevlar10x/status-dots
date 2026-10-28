@@ -54,6 +54,8 @@ const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 // The app's rename tool, as Claude calls it.
 const RENAME = `mcp__${SESSIONS}__set_session_title`
+// The app's session ids, which name its record files.
+const SESSION_ID = /^local_[\w-]+$/
 
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
@@ -133,7 +135,7 @@ async function titleOf($: Engine) {
   const result = await call($, SESSIONS, 'get_session', { session_id: 'self' })
   if (result.isError) return undefined
   const session = JSON.parse(textOf(result)) as { title?: string; sessionId?: string }
-  sessionId ??= session.sessionId
+  if (SESSION_ID.test(session.sessionId ?? '')) sessionId ??= session.sessionId
   knownTitle = session.title?.trim() ?? ''
   return knownTitle
 }
@@ -233,6 +235,9 @@ async function isNamedByYou($: Engine) {
 
 // The same for another session, from its record next to this one's.
 async function isOtherNamedByYou($: Engine, id: string) {
+  // The id becomes part of a file path, so one that isn't the app's usual
+  // shape is left alone rather than looked up.
+  if (!SESSION_ID.test(id)) return true
   try {
     const path = await findRecord($)
     if (path === undefined) return false
