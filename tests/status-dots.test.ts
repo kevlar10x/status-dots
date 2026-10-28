@@ -66,7 +66,9 @@ function gate() {
 
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], isError })
 
-const DATA = 'C:/Users/me/AppData/Local/Claude-Data'
+// A POSIX root, so the tests run on macOS and Linux too; on Windows the engine
+// may add a drive letter, which `norm` drops.
+const DATA = '/Users/me/AppData/Local/Claude-Data'
 const RECORD = `${DATA}/claude_abc/claude-code-sessions/org/acct/local_1.json`
 
 // The clock of the test that's running; the helpers below settle it, since the
@@ -85,10 +87,10 @@ const RENAME = 'mcp__ccd_session_mgmt__set_session_title'
 function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   const clock = mock.clock(on, { now: 0 })
   current = clock
-  mock.env(on, { LOCALAPPDATA: 'C:/Users/me/AppData/Local' })
+  mock.env(on, { LOCALAPPDATA: '/Users/me/AppData/Local' })
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   // The engine may hand paths over in Windows form.
-  const norm = (path: string) => path.replace(/\\/g, '/')
+  const norm = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
   const OTHER = new RegExp(`^${DATA}/claude_abc/claude-code-sessions/org/acct/(local_\\w+)\\.json$`)
   const recordAt = (path: string) =>
     norm(path) === RECORD ? app.record : app.otherRecords?.[OTHER.exec(norm(path))?.[1] ?? '']

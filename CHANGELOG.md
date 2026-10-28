@@ -1,6 +1,11 @@
 # Changelog
 
-Tested on Claude Code 2.1.308 with desktop app 3.6556 (Windows).
+Tested on Claude Code 2.1.310 with desktop app 4.29 (Windows).
+
+## 0.6.5 - 2026-10-28
+
+- Checked on Claude Code 2.1.310 with desktop app 4.29.
+- The mod's tests now run on macOS and Linux too. Before, ten of them failed there because their stand-in folder was a Windows path.
 
 ## 0.6.4 - 2026-10-28
 

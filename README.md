@@ -37,7 +37,7 @@ claude plugin install status-dots --marketplace kevlar10x/status-dots
 
 In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `kevlar10x/status-dots`, then **Add plugin**.
 
-It needs a Claude Code version that runs mods. It was built and tested on Claude Code 2.1.308 with desktop app 3.6556 on Windows. Terminal sessions have no sidebar, so there it does nothing.
+It needs a Claude Code version that runs mods. It was built on Claude Code 2.1.308 with desktop app 3.6556 and last tested on Claude Code 2.1.310 with desktop app 4.29, on Windows. Terminal sessions have no sidebar, so there it does nothing.
 
 It works in sessions that start after you install it. Sessions that are already open pick it up once they restart, for example when you restart the app.
 
