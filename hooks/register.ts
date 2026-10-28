@@ -1,5 +1,7 @@
 import type { EngineInterface as Engine, McpToolResult, Register, Timer } from 'claude-code'
 
+import type { Turn } from '../types'
+
 // status-dots by kevlar10x, MIT: https://github.com/kevlar10x/status-dots
 //
 // Puts a colored dot in front of this session's title, which the Code tab's
@@ -56,6 +58,11 @@ const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 const RENAME = `mcp__${SESSIONS}__set_session_title`
 // The app's session ids, which name its record files.
 const SESSION_ID = /^local_[\w-]+$/
+// The current turn, held by the host. A reload of the mod's code in the middle
+// of a turn (an update, a dev folder's hot reload) starts a new copy with
+// nothing in memory, and the turn's end can still reach the old copy while
+// its tool calls reach the new one, so both keep the turn here too.
+const TURN = { plugin: 'status-dots', key: 'turn' } as const
 
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
@@ -300,6 +307,18 @@ function stopFollowing() {
   verdictCheck = undefined
 }
 
+function holdTurn($: Engine, turn: Turn) {
+  void $.state.set(TURN, turn).catch(() => undefined)
+}
+
+async function heldTurn($: Engine) {
+  try {
+    return (await $.state.get(TURN)).value
+  } catch {
+    return undefined
+  }
+}
+
 // Whether the dots are off, in this session or another one since it last
 // looked. Another session's /dots off has already taken this dot away, so
 // this one drops its dot and its checks rather than bring it back.
@@ -519,6 +538,15 @@ function stopWatching() {
 // for a while, until a turn starts and takes over.
 async function checkAtStart($: Engine, triesLeft: number) {
   if (hasTurned) return
+  // A reload in the middle of a turn fires this again: the turn goes on, and
+  // its white dot isn't one left from a run that stopped.
+  const held = await heldTurn($)
+  if (held?.isAsking) isAsking = true
+  if (held?.isWorking) {
+    hasTurned = true
+    wanted = 'working'
+    return
+  }
   let title: string
   try {
     title = (await titleOf($)) ?? ''
@@ -582,6 +610,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       questions = 0
       isAsking = false
+      holdTurn($, { isWorking: true, isAsking: false })
       stopWatching()
       stopFollowing()
       hasTurned = true
@@ -596,6 +625,9 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
+    // A copy of the mod reloaded mid-turn may have seen the question instead.
+    if ((await heldTurn($))?.isAsking) isAsking = true
+    holdTurn($, { isWorking: false, isAsking })
     questions = 0
     // An answer whose next-step box asks you something leaves it your turn. A
     // question only in the reply's text doesn't: nothing on screen waits for you.
@@ -624,7 +656,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     if (e.tool === WRAP_UP && e.agentId === undefined) {
       const ask = (e as { ask?: unknown }).ask
-      if (typeof ask === 'string' && ask.trim() !== '') isAsking = true
+      if (typeof ask === 'string' && ask.trim() !== '') {
+        isAsking = true
+        holdTurn($, { isWorking: true, isAsking: true })
+      }
     }
     const isQuestion = ASKS.has(e.tool)
     if (isQuestion) {

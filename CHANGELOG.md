@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.310 with desktop app 4.29 (Windows).
 
+## 0.6.6 - 2026-10-28
+
+- An update of the mod while a session was working could cost that turn its dot. A question in the next-step box showed blue or green instead of yellow, and the white dot could drop in the middle of the turn. The mod now keeps the current turn's state with Claude Code itself, where reloading the mod doesn't wipe it.
+
 ## 0.6.5 - 2026-10-28
 
 - Checked on Claude Code 2.1.310 with desktop app 4.29.

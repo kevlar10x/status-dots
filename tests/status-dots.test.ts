@@ -55,6 +55,19 @@ function sharedStore(on: On, entries: Record<string, unknown> = {}) {
   return entries
 }
 
+// The host's named values for this session, which survive a reload of the
+// mod's code; a test writes to them as another copy of the mod would.
+function sharedState(on: On, values: Record<string, unknown> = {}) {
+  let version = 0
+  on('state.get', (_, e) => ({ value: { value: values[e.key], version } }))
+  on('state.set', (_, e) => {
+    values[e.key] = e.value
+    version += 1
+    return { value: { isSet: true, version } }
+  })
+  return values
+}
+
 // A promise that resolves when the test says so.
 function gate() {
   let open = () => {}
@@ -643,6 +656,32 @@ test("a question in the next-step box that doesn't stop the work stays yellow", 
   app.record = summed('completed', 'a2', { description: 'Confirmed the rule.' })
   await clock.advance(4_000)
   expect(app.title).toBe('🟡 Perf rule')
+})
+
+test("a next-step question seen by a reloaded copy of the mod still turns the dot yellow", async ($, on) => {
+  mock.store(on)
+  const held = sharedState(on)
+  const app: App = { title: 'Nexus draft', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+  await begin($)
+
+  // An update reloads the mod mid-turn: the new copy sees the wrap_up's question,
+  // while the turn's end still reaches this copy, which didn't.
+  held.turn = { isWorking: true, isAsking: true }
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Nexus draft')
+})
+
+test("a reload in the middle of a turn doesn't take the white dot off", async ($, on) => {
+  mock.store(on)
+  sharedState(on, { turn: { isWorking: true, isAsking: false } })
+  const app: App = { title: '⚪ Long turn', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  // The reloaded copy starts with nothing in memory while the turn goes on.
+  await start($)
+  await clock.advance(30_000)
+  expect(app.title).toBe('⚪ Long turn')
 })
 
 test('a yellow dot for a next-step question stays when the session starts again', async ($, on) => {
