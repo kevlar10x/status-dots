@@ -2,6 +2,12 @@
 
 Tested on Claude Code 2.1.310 with desktop app 4.29 (Windows).
 
+## 0.6.7 - 2026-10-30
+
+- A blue dot now stays until you click the session. One failed check of where the session was showing used to count as you having seen it, so a blue dot could turn green by itself, including when a session started again.
+- In a split window, a session that finishes in a pane you aren't in stays blue until you click into that pane.
+- Opening a session and leaving before the next check now turns it green, because the mod goes by the time the app notes for each click.
+
 ## 0.6.6 - 2026-10-28
 
 - An update of the mod while a session was working could cost that turn its dot. A question in the next-step box showed blue or green instead of yellow, and the white dot could drop in the middle of the turn. The mod now keeps the current turn's state with Claude Code itself, where reloading the mod doesn't wipe it.

@@ -14,6 +14,11 @@ type App = {
   others?: { sessionId: string; title: string }[]
   // Whether the app shows this session in a window; shown unless a test says not.
   isOffScreen?: boolean
+  // The window is split and another session's pane has the focus.
+  isUnfocusedPane?: boolean
+  // Asking where the session shows fails, or the answer leaves it out.
+  isLayoutFailing?: boolean
+  isLayoutBlank?: boolean
   isMissing?: boolean
   // The app's tools aren't connected yet, as in a process that has just started.
   isConnecting?: boolean
@@ -163,7 +168,12 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (e.tool === 'get_window_layout') {
       app.layoutChecks = (app.layoutChecks ?? 0) + 1
       await app.layoutHold
-      return { value: text(JSON.stringify({ this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
+      if (app.isLayoutFailing) return { value: text('The app window is not ready.', true) }
+      if (app.isLayoutBlank) return { value: text('{}') }
+      const panes = app.isOffScreen ? []
+        : app.isUnfocusedPane ? [{ session_id: 'local_2', focused: true }, { session_id: 'local_1', focused: false }]
+        : [{ session_id: 'local_1', focused: true }]
+      return { value: text(JSON.stringify({ main_window: { panes }, this_session: { session_id: 'local_1', on_screen: !app.isOffScreen } })) }
     }
     const awaitCard = () => {
       app.cards = (app.cards ?? 0) + 1
@@ -308,6 +318,127 @@ test('a blue dot turns green when you open the session after a restart', async (
   app.isOffScreen = false
   await clock.advance(5_000)
   expect(app.title).toBe('🟢 Finished overnight')
+})
+
+test('a check that fails leaves a blue dot blue, and it still turns green when you open it', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Long build', source: 'auto', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+
+  app.isLayoutFailing = true
+  await clock.advance(60_000)
+  expect(app.title).toBe('🔵 Long build')
+  app.isLayoutFailing = false
+  app.isLayoutBlank = true
+  await clock.advance(60_000)
+  expect(app.title).toBe('🔵 Long build')
+
+  app.isLayoutBlank = false
+  app.isOffScreen = false
+  await clock.advance(15_000)
+  expect(app.title).toBe('🟢 Long build')
+})
+
+test("a turn that ends while the check fails stays blue until the app can say you're there", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Open here', source: 'auto', renames: [], isLayoutFailing: true }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Open here')
+
+  app.isLayoutFailing = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('🟢 Open here')
+})
+
+test('a blue dot stays blue when the session starts and the check fails', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🔵 Unopened', source: 'tool', renames: [], isLayoutFailing: true }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(5_000)
+  expect(app.title).toBe('🔵 Unopened')
+})
+
+test('in a split window a finished session stays blue until you click into its pane', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Side pane', source: 'auto', renames: [], isUnfocusedPane: true }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Side pane')
+  await clock.advance(15_000)
+  expect(app.title).toBe('🔵 Side pane')
+
+  app.isUnfocusedPane = false
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Side pane')
+})
+
+test('a click between two checks still turns blue green', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Quick look', source: 'auto', renames: [], isOffScreen: true, record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await clock.advance(1_000)
+  await end($, 'answer')
+  await clock.advance(10 * 60_000)
+  expect(app.title).toBe('🔵 Quick look')
+
+  // You opened it and left again before the next check came round.
+  app.record = { lastFocusedAt: 601_000 }
+  await clock.advance(15_000)
+  expect(app.title).toBe('🟢 Quick look')
+})
+
+test('a click from before the turn ended leaves the dot blue', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Long build', source: 'auto', renames: [], isOffScreen: true, record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await clock.advance(5_000)
+  // Clicked while it worked, then left it.
+  app.record = { lastFocusedAt: 5_000 }
+  await clock.advance(5_000)
+  await end($, 'answer')
+  await clock.advance(60_000)
+  expect(app.title).toBe('🔵 Long build')
+})
+
+test('a blue dot clicked while no process watched it goes green when the session starts', async ($, on) => {
+  mock.store(on)
+  const app: App = {
+    title: '🔵 Seen meanwhile',
+    source: 'tool',
+    renames: [],
+    isOffScreen: true,
+    record: { lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+  }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🟢 Seen meanwhile')
+})
+
+test('a blue dot last clicked before its turn ended stays blue when the session starts', async ($, on) => {
+  mock.store(on)
+  const app: App = {
+    title: '🔵 Not seen yet',
+    source: 'tool',
+    renames: [],
+    isOffScreen: true,
+    record: { lastTurnEdgeAt: 200, lastFocusedAt: 100 },
+  }
+  engine(on, app)
+  await start($)
+  expect(app.title).toBe('🔵 Not seen yet')
 })
 
 test('red when an error or a refusal ends the turn', async ($, on) => {
@@ -986,6 +1117,21 @@ test('without an app to reach, a dot change soon costs a single try', async ($, 
   await begin($)
   await clock.advance(15_000)
   expect((app.calls ?? 0) - before).toBe(1)
+})
+
+test('without an app to reach, a finished turn starts no blue checks', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Terminal', source: 'auto', renames: [], isMissing: true }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(31_000)
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(15_000)
+
+  const before = app.calls ?? 0
+  await clock.advance(10 * 60_000)
+  expect((app.calls ?? 0) - before).toBe(0)
 })
 
 test("a rename answer that doesn't name the old title means a fresh read next time", async ($, on) => {

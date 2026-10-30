@@ -84,6 +84,8 @@ let seenCheck: Timer | undefined
 let seenChecks = 0
 // A turn has started in this process, so the start check has nothing left to do.
 let hasTurned = false
+// When the last turn in this process ended. A click after this means you've seen it.
+let finishedAt: number | undefined
 // Counts the main loop's turns, so a check started for one turn knows when another began.
 let turnCount = 0
 // After a turn: the next look for the app's verdict on it.
@@ -109,6 +111,9 @@ type AppRecord = {
   errorCategory?: unknown
   // 'user' when you named the session yourself.
   titleSource?: unknown
+  // When you last clicked the session, and when its last turn began or ended.
+  lastFocusedAt?: unknown
+  lastTurnEdgeAt?: unknown
 }
 type Verdict = 'waiting' | 'failed' | 'finished'
 
@@ -209,6 +214,8 @@ async function loadRecord($: Engine) {
       error: full.error,
       errorCategory: full.errorCategory,
       titleSource: full.titleSource,
+      lastFocusedAt: full.lastFocusedAt,
+      lastTurnEdgeAt: full.lastTurnEdgeAt,
     }
     loaded = { mtimeMs, record }
   }
@@ -473,24 +480,49 @@ async function clearOthers($: Engine) {
   return cleared
 }
 
-// Whether the app shows this session in a window now. A failed check counts as
-// shown, so a session the check can't reach goes green instead of staying blue.
+// Whether you have this session in front of you now: showing in a window and,
+// when the window is split, in the pane with the focus. A failed check says no,
+// so a hiccup of the app can't pass for you opening the session.
 async function isOnScreen($: Engine) {
   try {
     const result = await call($, WINDOW, 'get_window_layout', {})
-    if (result.isError) return true
-    const layout = JSON.parse(textOf(result)) as { this_session?: { on_screen?: boolean } }
-    return layout.this_session?.on_screen !== false
+    if (result.isError) return false
+    const layout = JSON.parse(textOf(result)) as {
+      main_window?: { panes?: { session_id?: string; focused?: boolean }[] }
+      this_session?: { session_id?: string; on_screen?: boolean }
+    }
+    const shown = layout.this_session
+    if (shown?.on_screen !== true) return false
+    return layout.main_window?.panes?.find(pane => pane.session_id === shown.session_id)?.focused !== false
   } catch {
-    return true
+    return false
   }
 }
 
-// A finished session stays blue until you've had it on screen, then turns green.
+// The app stamps a session each time you click it, so a click after the turn
+// ended counts even if you left again before the next check came round. A new
+// process doesn't know when that was, so it goes by the app's own time for it.
+function wasClicked({ lastFocusedAt, lastTurnEdgeAt }: AppRecord) {
+  const since = finishedAt ?? lastTurnEdgeAt
+  return typeof lastFocusedAt === 'number' && typeof since === 'number' && lastFocusedAt > since
+}
+
+// Whether you've opened this session since it finished.
+async function hasSeen($: Engine) {
+  try {
+    const latest = await loadRecord($)
+    if (latest !== undefined && wasClicked(latest.record)) return true
+  } catch {
+    // The record can't say. The window still can.
+  }
+  return isOnScreen($)
+}
+
+// A finished session stays blue until you've opened it, then turns green.
 async function showFinished($: Engine) {
   if (isUserTitle) return
   const turn = turnCount
-  const isSeen = await isOnScreen($)
+  const isSeen = await hasSeen($)
   // A new turn may have started while the check was out.
   if (turn !== turnCount) return
   show($, isSeen ? 'done' : 'fresh')
@@ -515,11 +547,12 @@ function watchUntilSeen($: Engine, isNew = false) {
     seenCheck = undefined
     seenChecks += 1
     if (wanted !== 'fresh') return
-    const isSeen = await isOnScreen($)
+    const isSeen = await hasSeen($)
     // A turn may have started while the check was out.
     if (wanted !== 'fresh') return
     if (isSeen) show($, 'done')
-    else watchUntilSeen($)
+    // Where no app has answered (a terminal session), nothing will ever say you've seen it.
+    else if (sessionId !== undefined) watchUntilSeen($)
   })
 }
 
@@ -577,7 +610,7 @@ async function checkAtStart($: Engine, triesLeft: number) {
     return
   }
   if (wanted !== 'fresh') return
-  if (await isOnScreen($)) {
+  if (await hasSeen($)) {
     if (!hasTurned && wanted === 'fresh') show($, 'done')
   } else watchUntilSeen($, true)
 }
@@ -625,6 +658,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
+    finishedAt = await $.clock.now()
     // A copy of the mod reloaded mid-turn may have seen the question instead.
     if ((await heldTurn($))?.isAsking) isAsking = true
     holdTurn($, { isWorking: false, isAsking })
