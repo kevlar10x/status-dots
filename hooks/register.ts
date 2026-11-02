@@ -9,10 +9,12 @@ import type { Turn } from '../types'
 // a refusal stopped Claude, yellow when something on screen waits for you (a
 // question, a plan or a permission card, or a question in the next-step box),
 // blue when it finished while you weren't looking, green once you've seen it
-// and it needs nothing from you, white while Claude works. The desktop app
-// gives mods no way to recolor its own sidebar dot, so the title carries it. A
-// title you typed yourself is yours: the app won't let anything but an
-// approved rename change it, so that session gets no dot.
+// and it needs nothing from you. While Claude works the title has no dot: the
+// app's grey dot already says so, and the app heads its Windows notifications
+// with the title. The desktop app gives mods no way to recolor its own sidebar
+// dot, so the title carries it. A title you typed yourself is yours: the app
+// won't let anything but an approved rename change it, so that session gets no
+// dot.
 //
 // Hooks never wait for the title: they set the dot they want and pass their
 // event straight on, and the title catches up a moment later.
@@ -20,8 +22,8 @@ import type { Turn } from '../types'
 type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 
 // Yellow is the app's own color for a session that needs input, blue its color
-// for one with something you haven't seen. White is the nearest emoji to the
-// app's grey working dot.
+// for one with something you haven't seen. White is never written: it's here so
+// a title left with one by an older version is recognized and cleaned up.
 const DOTS: Record<Status, string> = { working: '⚪', waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
 const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
@@ -158,7 +160,7 @@ function statusOf(title: string): Status | undefined {
 
 function dotted(title: string, status: Status | undefined) {
   const bare = title.replace(DOT, '')
-  return status === undefined ? bare : `${DOTS[status]} ${bare}`
+  return status === undefined || status === 'working' ? bare : `${DOTS[status]} ${bare}`
 }
 
 // The app answers a rename with `Renamed this session to "new" (was "old").`
@@ -571,8 +573,7 @@ function stopWatching() {
 // for a while, until a turn starts and takes over.
 async function checkAtStart($: Engine, triesLeft: number) {
   if (hasTurned) return
-  // A reload in the middle of a turn fires this again: the turn goes on, and
-  // its white dot isn't one left from a run that stopped.
+  // A reload in the middle of a turn fires this again, and the turn goes on.
   const held = await heldTurn($)
   if (held?.isAsking) isAsking = true
   if (held?.isWorking) {
@@ -600,9 +601,9 @@ async function checkAtStart($: Engine, triesLeft: number) {
   if (wanted === 'waiting' && record?.turnWrapUp !== undefined) isAsking = true
   if (verdict === 'finished' && !keepsFinishedDot()) return showFinished($)
   if (verdict !== undefined) applyVerdict($, verdict)
-  // A white dot with no turn behind it is left from a run that stopped mid-turn:
-  // the process ended, or the app closed without picking the turn up again. A
-  // turn that resumes takes over within moments; if none does, the dot goes.
+  // A white dot is left by an older version, from a run that stopped mid-turn: the
+  // process ended, or the app closed without picking the turn up again. A turn
+  // that resumes takes over within moments; if none does, the dot goes.
   if (wanted === 'working') {
     $.clock.after(STALE_WORKING_MS, () => {
       if (!hasTurned && wanted === 'working') show($, undefined)

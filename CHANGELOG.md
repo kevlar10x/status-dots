@@ -1,6 +1,12 @@
 # Changelog
 
-Tested on Claude Code 2.1.310 with desktop app 4.29 (Windows).
+Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
+
+## 0.6.8 - 2026-11-02
+
+- Titles have no dot while Claude works, so the white dot no longer shows up in Windows notifications, which use the title. The app's own dot shows that a session is working.
+- A white dot left by an older version goes when that session's next turn starts.
+- A notification for a question or a plan can still show the yellow dot.
 
 ## 0.6.7 - 2026-10-30
 
