@@ -1131,6 +1131,291 @@ test('a white dot stays when the turn picks up again after a restart', async ($,
   expect(app.title).toBe('⚪ Resumed')
 })
 
+// Background work still running as a turn ends, as Claude Code lists it then.
+const TASK = { id: 'b1', type: 'subagent', status: 'running', description: 'Attack the pick' }
+
+const stopWith = async ($: Engine, tasks: Record<string, unknown>[]) => {
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: tasks } as Parameters<Engine['classic']['Stop']>[0])
+  await current.settle()
+}
+
+test('a turn that ends with background work still running stays white', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  expect(app.stopTitle).toBe('Deep research')
+  await end($, 'answer')
+  expect(app.title).toBe('⚪ Deep research')
+  // The app's summary of the turn doesn't finish it either.
+  app.record = summed('completed', 'a2')
+  await clock.advance(30_000)
+  expect(app.title).toBe('⚪ Deep research')
+})
+
+test('once the background work reports back and nothing else runs, the dot finishes', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [], isOffScreen: true }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK, { id: 'b2', type: 'shell', status: 'pending', description: 'sleep', command: 'sleep 60' }])
+  await end($, 'answer')
+  expect(app.title).toBe('⚪ Deep research')
+  // Its report wakes a turn of its own, which ends with nothing left running.
+  await begin($)
+  await stopWith($, [])
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Deep research')
+})
+
+test('a turn after background work ends finished when Claude Code lists no work at all', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  await begin($)
+  await stop($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Deep research')
+})
+
+test('background work listed as ended leaves the turn finished', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [{ ...TASK, status: 'completed' }, { ...TASK, id: 'b2', status: 'killed' }])
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Deep research')
+})
+
+test("a subagent's own background work doesn't keep the session white", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await $.classic.Stop({ stop_hook_active: false, agent_id: 'sub', background_tasks: [TASK] } as Parameters<Engine['classic']['Stop']>[0])
+  await stopWith($, [])
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Deep research')
+})
+
+test('a question in the next-step box is yellow even with background work running', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Started the check.', ask: 'Keep the runner-up?' })
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Deep research')
+})
+
+test('a turn you stop with background work running leaves no dot', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'aborted')
+  expect(app.title).toBe('Deep research')
+})
+
+test('a new turn forgets the background work of the one before', async ($, on) => {
+  mock.store(on)
+  const held = sharedState(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  // The next turn ends on an error, which Claude Code reports without a list.
+  await begin($)
+  await $.classic.StopFailure({ error: 'server_error' })
+  await end($, 'error')
+  expect(app.title).toBe('🔴 Deep research')
+  expect(held.turn).toEqual({ isWorking: false, isAsking: false })
+})
+
+test('a reload while background work runs keeps the white dot', async ($, on) => {
+  mock.store(on)
+  sharedState(on, { turn: { isWorking: false, isAsking: false, hasTasks: true } })
+  const app: App = { title: '⚪ Deep research', source: 'tool', renames: [], record: summed('completed', 'a2') }
+  const clock = engine(on, app)
+  // The reloaded copy starts with nothing in memory between turns.
+  await start($)
+  await clock.advance(30_000)
+  expect(app.title).toBe('⚪ Deep research')
+})
+
+test('the white dot of a turn that ended with background work is held for a reload', async ($, on) => {
+  mock.store(on)
+  const held = sharedState(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  expect(held.turn).toEqual({ isWorking: false, isAsking: false, hasTasks: true })
+  await begin($)
+  expect(held.turn).toEqual({ isWorking: true, isAsking: false })
+})
+
+// A call that waits until the test lets it return, as one waiting on a card
+// the app put up for you would.
+const waitOn = ($: Engine, app: App, input: Record<string, unknown> & { tool: string }) => {
+  const answer = gate()
+  app.toolHold = answer.held
+  const call = $.tool.call(input as unknown as Parameters<Engine['tool']['call']>[0])
+  return { call, open: answer.open }
+}
+
+test('a browser call still out after 20 seconds turns yellow, and white again once it returns', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Find a jacket', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  const site = waitOn($, app, { tool: 'mcp__Claude_Browser__find', tabId: 'tab-1', query: 'bomber' })
+  await clock.advance(19_999)
+  expect(app.title).toBe('⚪ Find a jacket')
+  await clock.advance(1)
+  expect(app.title).toBe('🟡 Find a jacket')
+  site.open()
+  await site.call
+  await clock.settle()
+  expect(app.title).toBe('⚪ Find a jacket')
+})
+
+test('a browser call that returns in time never turns yellow', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Find a jacket', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__claude-in-chrome__navigate', url: 'https://example.com' })
+  await clock.advance(60_000)
+  expect(app.renames).toEqual(['⚪ Find a jacket'])
+})
+
+test('an app card turns yellow two seconds after its call goes out', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Status Dots', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  const card = waitOn($, app, { tool: 'mcp__ccd_directory__propose_branch', name: 'background-tasks' })
+  await clock.advance(1999)
+  expect(app.title).toBe('⚪ Status Dots')
+  await clock.advance(1)
+  expect(app.title).toBe('🟡 Status Dots')
+  card.open()
+  await card.call
+  await clock.settle()
+  expect(app.title).toBe('⚪ Status Dots')
+})
+
+test("a background subagent's card keeps the dot yellow through the main loop's turns", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  expect(app.title).toBe('⚪ Deep research')
+  const site = waitOn($, app, { tool: 'mcp__Claude_Browser__find', agentId: 'sub', tabId: 'tab-1', query: 'bomber' })
+  await clock.advance(20_000)
+  expect(app.title).toBe('🟡 Deep research')
+  // Another task's report wakes the main loop while the card is still up.
+  await begin($)
+  expect(app.title).toBe('🟡 Deep research')
+  await stopWith($, [TASK])
+  expect(app.stopTitle).toBe('Deep research')
+  await end($, 'answer')
+  await clock.advance(30_000)
+  expect(app.title).toBe('🟡 Deep research')
+  site.open()
+  await site.call
+  await clock.settle()
+  expect(app.title).toBe('⚪ Deep research')
+  // The subagent reports back with nothing else running.
+  await begin($)
+  await stopWith($, [])
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Deep research')
+})
+
+test("a subagent's question stays yellow when the main loop takes a turn", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Deep research', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  const asked = waitOn($, app, { tool: 'AskUserQuestion', agentId: 'sub', questions: [] })
+  await clock.advance(1000)
+  expect(app.title).toBe('🟡 Deep research')
+  await begin($)
+  expect(app.title).toBe('🟡 Deep research')
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Deep research')
+  asked.open()
+  await asked.call
+  await clock.settle()
+  expect(app.title).toBe('⚪ Deep research')
+})
+
+test("another call returning in a question's first second doesn't bring yellow early", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  const asked = waitOn($, app, { tool: 'AskUserQuestion', questions: [] })
+  await clock.advance(500)
+  // A subagent's call goes out and returns while the question waits.
+  app.toolHold = undefined
+  await tool($, { tool: 'Read', agentId: 'sub', file_path: '/x' })
+  await clock.advance(499)
+  expect(app.title).toBe('Pick a palette')
+  await clock.advance(1)
+  expect(app.title).toBe('🟡 Pick a palette')
+  asked.open()
+  await asked.call
+  await clock.settle()
+  expect(app.title).toBe('⚪ Pick a palette')
+})
+
 test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
   mock.store(on)
   const app: App = { title: '🟡 btt', source: 'tool', renames: [], record: summed('blocked') }

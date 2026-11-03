@@ -2,6 +2,12 @@
 
 Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
 
+## 0.7.0 - 2026-11-03
+
+- A turn that ends while background work is still running (a subagent, a command, a monitor) keeps the white dot. It goes green or blue once that work has reported back and Claude finishes with nothing left running.
+- The dot now turns yellow for cards the app puts up itself, such as the browser asking you to allow a site. Claude Code never hears about these, so the mod goes by time: a browser call still out after 20 seconds, or a call to one of the app's other card tools (a branch, a folder, a new session, screen access, deleting a session) still out after 2 seconds, counts as waiting for you.
+- A question or card in a subagent now keeps the dot yellow while the main conversation takes its own turns. Before, the next turn there turned it white, then green or blue.
+
 ## 0.6.9 - 2026-11-03
 
 - The white dot is back while Claude works. 0.6.8 had taken it out of the sidebar as well as the notifications.

@@ -7,10 +7,10 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 | Dot | The session |
 |---|---|
 | 🔴 | was stopped by an error or a refusal |
-| 🟡 | is waiting for you on screen: a question, a plan to approve, a permission card, or a question in the app's next-step box |
+| 🟡 | is waiting for you on screen: a question, a plan to approve, a permission card, a card the app put up itself (such as allowing a site in the browser), or a question in the app's next-step box |
 | 🔵 | finished while you weren't looking at it, and needs nothing from you |
 | 🟢 | finished, you've seen it, and it needs nothing from you |
-| ⚪ | is working |
+| ⚪ | is working, or has background work still running |
 | no dot | was stopped by you, or hasn't finished a turn since it was named |
 
 Read it like a traffic light: red needs fixing, yellow is your turn, green is done. White means Claude is still at it. Blue marks a finish you haven't looked at yet, and it turns green once you open the session.
@@ -58,6 +58,9 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - Dots change within a moment of what they show. The mod makes Claude wait for a title change in two places, for 300 ms at most: at the end of a turn and when a question or a plan goes up. That way their notifications come without a dot.
 - A question or a plan turns the dot yellow a second after it goes up. Until then the title has no dot, so the notification goes out without one.
 - A permission card turns the dot yellow about 6 seconds after it goes up, when Claude Code reports it. Until then the dot stays white.
+- The app puts up some cards itself, such as the browser asking you to allow a site, and Claude Code never hears about them. So the mod goes by time: a browser call still out after 20 seconds, or a call to one of the app's other card tools (a branch, a folder, a new session, screen access, deleting a session) still out after 2 seconds, counts as waiting for you. A browser page that takes longer than that to load turns the dot yellow until it's done.
+- Something waiting for you in a subagent keeps the dot yellow while the main conversation goes on.
+- A turn that ends while background work still runs (a subagent, a command, a monitor) stays white. That work reports back when it ends, and the dot turns green or blue once Claude finishes with nothing left running. Scheduled wake-ups, such as `/loop`, don't count.
 - A session that finishes while it's open in front of you goes straight to green. Blue stays until you click the session, and in a split window that means clicking into its pane. The app notes each click, so a quick look counts even if you move on right away. A blue session checks for that every second for the first 20 seconds, then every 4 seconds, and every 15 seconds once it has stayed blue for about 5 minutes. It only checks while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
 - When a session starts again, its dot is matched to the app's record of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
 - If a session stopped in the middle of a turn (its process ended, or the app closed and didn't pick the turn up again), its white dot goes when the session starts and no turn follows within 10 seconds.
@@ -65,7 +68,7 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 
 ## Privacy
 
-The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. While a session runs, Claude Code also holds two yes-or-no values for it in memory, whether Claude is working and whether the next-step box asks you something, so an update of the mod in the middle of a turn doesn't lose them. It reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`) and uses only this from it: whether the app has summed up the latest reply yet, whether that reply's next-step box was shown and asked you something, whether an error ended the turn, whether you named the session yourself, when you last clicked the session, and when its last turn began or ended. When you run `/dots off`, it reads one thing from the file of each other session that has a dot: whether you named that one yourself, so it can leave it alone. It holds those few fields in memory while the session runs and saves none of them. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
+The mod reads this session's title from the desktop app and writes it back through the app's own rename tool. When you run `/dots off`, it also reads your other sessions' titles to take their dots off. It keeps two values in its own storage on your computer: whether the dots are off, and whether it has shown its one-time note. While a session runs, Claude Code also holds three yes-or-no values for it in memory, whether Claude is working, whether the next-step box asks you something, and whether background work was still running when the last turn ended, so an update of the mod in the middle of a turn doesn't lose them. It reads this session's own file in the desktop app's data folder (`%LOCALAPPDATA%\Claude-Data`) and uses only this from it: whether the app has summed up the latest reply yet, whether that reply's next-step box was shown and asked you something, whether an error ended the turn, whether you named the session yourself, when you last clicked the session, and when its last turn began or ended. When you run `/dots off`, it reads one thing from the file of each other session that has a dot: whether you named that one yourself, so it can leave it alone. It holds those few fields in memory while the session runs and saves none of them. It makes no network requests and starts no programs. The app may record title changes in its own usage data, as it does for any rename.
 
 ## What it calls and hooks
 
@@ -86,10 +89,10 @@ Those are the only tools it calls. It runs no commands or programs and fetches n
 
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot turns white while Claude works, then green, blue, yellow or red when the turn ends. Subagents' turns are skipped.
-- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. Before a question or a plan goes on, it waits up to 300 ms for the dot to come off. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
+- `turn.start` and `turn.complete`: the dot turns white while Claude works, then green, blue, yellow or red when the turn ends. It stays white while background work runs. Subagents' turns are skipped.
+- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, while a call to one of the app's card tools is still out after 2 seconds or a browser call after 20, and at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. Before a question or a plan goes on, it waits up to 300 ms for the dot to come off. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
-- `classic.Stop` and `classic.StopFailure`: take the dot off the title just before the turn ends, normally or on an error, so the app's end-of-turn notification shows the plain title. Each waits for that rename, 300 ms at most, and reads nothing from the event except whether a subagent sent it.
+- `classic.Stop` and `classic.StopFailure`: take the dot off the title just before the turn ends, normally or on an error, so the app's end-of-turn notification shows the plain title. Each waits for that rename, 300 ms at most. From the event they read only whether a subagent sent it and, for `classic.Stop`, whether any background work it lists is still running.
 - `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's record of the last turn.
 
 It has no hook on permission checks, so it never takes part in a permission decision.
@@ -99,6 +102,7 @@ It has no hook on permission checks, so it never takes part in a permission deci
 - Tested on Windows only.
 - The app's record comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
 - The app heads its Windows notifications with the session's title. The dot comes off just before a turn ends and before a question or a plan goes up, so those notifications have no dot, and the title goes without one for a moment each time. A permission prompt's notification can still show the white dot, because the app reads the title as the prompt goes up, before a mod can change it. The line under the title is the app's own summary of the turn, which a mod can't change.
+- The mod can't see the cards the app puts up itself, so it guesses from how long a call takes. A card answered within its 2 or 20 seconds never turns the dot yellow, and a notification for one can show the white dot.
 
 ## Uninstall
 

@@ -60,12 +60,31 @@ const CLEAR_MS = 300
 const YELLOW_DELAY_MS = 1000
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
+// The app's tools that put up a card of their own and wait for your answer,
+// which Claude Code never hears about. One still out after a moment is
+// taken to be waiting on you; the ones the app lets through return sooner.
+const CARD_TOOLS = new Set([
+  'mcp__ccd_directory__propose_branch',
+  'mcp__ccd_directory__request_directory',
+  'mcp__ccd_directory__change_directory',
+  'mcp__ccd_session__start_session',
+  'mcp__ccd_session_mgmt__delete_session',
+  'mcp__computer-use__request_access',
+  'mcp__computer-use__request_teach_access',
+])
+const CARD_MS = 2000
+// The browsers ask you to allow a site, also out of Claude Code's sight. Their
+// calls normally take seconds, so one still out after this is waiting on you.
+const BROWSER = /^mcp__(?:[\w-]+__)?(?:Claude_Browser|claude-in-chrome)__/
+const BROWSER_MS = 20000
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 // The app's rename tool, as Claude calls it.
 const RENAME = `mcp__${SESSIONS}__set_session_title`
 // The app's session ids, which name its record files.
 const SESSION_ID = /^local_[\w-]+$/
+// How background work that has ended may still be listed.
+const ENDED = new Set(['completed', 'failed', 'killed'])
 // The current turn, held by the host. A reload of the mod's code in the middle
 // of a turn (an update, a dev folder's hot reload) starts a new copy with
 // nothing in memory, and the turn's end can still reach the old copy while
@@ -84,7 +103,9 @@ let unreachableRuns = 0
 // The title is one you set, which the app keeps.
 let isUserTitle = false
 let isOff = false
-let questions = 0
+// Calls waiting for you: a question or a plan, or a call held on a card the
+// app put up. One from a subagent outlasts the main loop's turns.
+const waits = new Set<symbol>()
 // The turn's end-of-turn box asks you something.
 let isAsking = false
 // While the dot is blue: the next check for whether you've opened the session.
@@ -98,6 +119,10 @@ let finishedAt: number | undefined
 let turnCount = 0
 // The dot came off for the end of a turn that hasn't ended yet.
 let isCleared = false
+// Background work (a subagent, a command, a monitor) was still running as the
+// last turn ended. It reports back in a turn of its own, so the session is
+// still working until then.
+let hasTasks = false
 // The dot came off for a question, and this brings yellow in behind it.
 let yellowSoon: Timer | undefined
 // After a turn: the next look for the app's verdict on it.
@@ -289,10 +314,11 @@ function verdictOf(record: AppRecord): Verdict | undefined {
 }
 
 // Whether a 'finished' verdict leaves the dot as it is: green or blue already,
-// or yellow for a question in the next-step box. The app records that question
-// only when it stops the work, so 'finished' can't say it's gone.
+// yellow for a question in the next-step box, or white while background work
+// runs. The app records that question only when it stops the work, so
+// 'finished' can't say it's gone.
 function keepsFinishedDot() {
-  return wanted === 'done' || wanted === 'fresh' || (wanted === 'waiting' && isAsking)
+  return wanted === 'done' || wanted === 'fresh' || (wanted === 'waiting' && isAsking) || (wanted === 'working' && hasTasks)
 }
 
 function applyVerdict($: Engine, verdict: Verdict) {
@@ -458,10 +484,12 @@ async function explainOnce($: Engine) {
   $.ui.toast("status-dots: you named this session yourself, so it gets no dot. Have Claude rename it once (you approve) and it will.")
 }
 
-// Sets the dot this session should show and starts writing it.
+// Sets the dot this session should show and starts writing it. While a call
+// waits for you, working or finished reads as your turn.
 function show($: Engine, status: Status | undefined) {
   stopYellowSoon()
-  wanted = isOff ? undefined : status
+  const isYours = waits.size > 0 && (status === 'working' || status === 'done' || status === 'fresh')
+  wanted = isOff ? undefined : isYours ? 'waiting' : status
   writeTries = 0
   void paint($)
 }
@@ -615,8 +643,10 @@ async function checkAtStart($: Engine, triesLeft: number) {
   // its white dot isn't one left from a run that stopped.
   const held = await heldTurn($)
   if (held?.isAsking) isAsking = true
-  if (held?.isWorking) {
+  // So does one between turns while background work runs.
+  if (held?.isWorking || held?.hasTasks) {
     hasTurned = true
+    hasTasks = held.hasTasks === true
     wanted = 'working'
     return
   }
@@ -658,7 +688,14 @@ async function checkAtStart($: Engine, triesLeft: number) {
 // Back to working once nothing waits on you. Tool calls only return inside a
 // turn, so this needs no turn of its own to have been seen.
 function resume($: Engine) {
-  if (questions === 0 && (wanted === 'waiting' || yellowSoon !== undefined)) show($, 'working')
+  if (waits.size === 0 && (wanted === 'waiting' || yellowSoon !== undefined)) show($, 'working')
+}
+
+// How long a call to the app's tools may run before it counts as waiting on a
+// card for you; undefined for the tools that never put one up.
+function cardDelay(tool: string) {
+  if (CARD_TOOLS.has(tool)) return CARD_MS
+  return BROWSER.test(tool) ? BROWSER_MS : undefined
 }
 
 // Another session may have turned the dots off since this one last looked.
@@ -681,9 +718,9 @@ export const register: Register = on => {
 
   on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) {
-      questions = 0
       isAsking = false
       isCleared = false
+      hasTasks = false
       holdTurn($, { isWorking: true, isAsking: false })
       stopWatching()
       stopFollowing()
@@ -697,9 +734,12 @@ export const register: Register = on => {
   })
 
   // Runs before the app hears that the turn has ended, so this one hook waits
-  // for the title.
+  // for the title. Claude Code lists here the background work still running.
   on('classic.Stop', async ($, e, next) => {
-    if (e.agent_id === undefined) await clearForEnd($)
+    if (e.agent_id === undefined) {
+      hasTasks = (e.background_tasks ?? []).some(task => !ENDED.has(task.status))
+      await clearForEnd($)
+    }
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -717,11 +757,14 @@ export const register: Register = on => {
     isCleared = false
     // A copy of the mod reloaded mid-turn may have seen the question instead.
     if ((await heldTurn($))?.isAsking) isAsking = true
-    holdTurn($, { isWorking: false, isAsking })
-    questions = 0
+    holdTurn($, hasTasks ? { isWorking: false, isAsking, hasTasks } : { isWorking: false, isAsking })
     // An answer whose next-step box asks you something leaves it your turn. A
     // question only in the reply's text doesn't: nothing on screen waits for you.
-    if (e.reason === 'answer' && !isAsking) void showFinished($)
+    // Background work still running keeps it white until its report's turn ends.
+    if (e.reason === 'answer' && !isAsking) {
+      if (hasTasks) show($, 'working')
+      else void showFinished($)
+    }
     // Stopped by you: no dot, since you were there to see it.
     else show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
     if (e.reason === 'answer') followVerdict($)
@@ -742,9 +785,10 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A question or a plan to approve waits for you until its call returns; any
-  // call returning moves an answered permission card back to working. When
-  // Claude renames this session, the mod reads the new name before its next dot.
+  // A question or a plan to approve waits for you until its call returns, and
+  // so does a call to the app's tools held on a card past its moment. Any call
+  // returning moves an answered permission card back to working. When Claude
+  // renames this session, the mod reads the new name before its next dot.
   on('tool.call', async ($, e, next) => {
     // Another mod's Stop hook can keep a turn going after its dot came off.
     if (isCleared && e.agentId === undefined) {
@@ -759,12 +803,19 @@ export const register: Register = on => {
       }
     }
     const isQuestion = ASKS.has(e.tool)
-    if (isQuestion) questions += 1
+    const wait = Symbol(e.tool)
+    if (isQuestion) waits.add(wait)
+    const delay = cardDelay(e.tool)
+    const cardSoon = delay === undefined ? undefined : $.clock.after(delay, () => {
+      waits.add(wait)
+      show($, 'waiting')
+    })
     try {
       if (isQuestion) await clearForQuestion($)
       return await next(e)
     } finally {
-      if (isQuestion) questions -= 1
+      cardSoon?.cancel()
+      waits.delete(wait)
       if (e.tool === RENAME) {
         const target = (e as { session_id?: unknown }).session_id
         if (target === 'self' || target === sessionId) {

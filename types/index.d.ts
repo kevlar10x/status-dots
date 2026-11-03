@@ -4,6 +4,8 @@ export type Turn = {
   isWorking: boolean
   // The turn's next-step box asks you something.
   isAsking: boolean
+  // Background work was still running when the turn ended.
+  hasTasks?: boolean
 }
 
 declare module 'claude-code' {
