@@ -10,9 +10,10 @@ A Claude Code mod for the Claude desktop app. It puts a colored dot in front of 
 | 🟡 | is waiting for you on screen: a question, a plan to approve, a permission card, or a question in the app's next-step box |
 | 🔵 | finished while you weren't looking at it, and needs nothing from you |
 | 🟢 | finished, you've seen it, and it needs nothing from you |
-| no dot | is working, was stopped by you, or hasn't finished a turn since it was named |
+| ⚪ | is working |
+| no dot | was stopped by you, or hasn't finished a turn since it was named |
 
-Read it like a traffic light: red needs fixing, yellow is your turn, green is done. Blue marks a finish you haven't looked at yet, and it turns green once you open the session. While Claude works, the title has no dot and the app's own dot shows the work.
+Read it like a traffic light: red needs fixing, yellow is your turn, green is done. White means Claude is still at it. Blue marks a finish you haven't looked at yet, and it turns green once you open the session.
 
 The app's own dot tells you a session is working, needs you or has something unread. Once you've opened a finished session, its dot goes away and the list no longer says how it ended. With several sessions running, status-dots keeps that in view.
 
@@ -54,10 +55,12 @@ Run `/dots off` before you uninstall, or the titles keep their last dot.
 - After you approve a permission card, the dot stays yellow until that tool call is done.
 - Yellow means something in the session is waiting for you on screen. A reply that only asks in its text, or that the app's own summary reads as waiting on you, stays green or blue, since there's nothing there to answer.
 - A few seconds after a turn ends, the mod checks the app's record of it. That puts back a question in the next-step box, or an error, that the mod missed when the turn ended.
-- Dots change within a moment of what they show, and the mod never makes Claude wait for a title change.
+- Dots change within a moment of what they show. The mod makes Claude wait for a title change in two places, for 300 ms at most: at the end of a turn and when a question or a plan goes up. That way their notifications come without a dot.
+- A question or a plan turns the dot yellow a second after it goes up. Until then the title has no dot, so the notification goes out without one.
+- A permission card turns the dot yellow about 6 seconds after it goes up, when Claude Code reports it. Until then the dot stays white.
 - A session that finishes while it's open in front of you goes straight to green. Blue stays until you click the session, and in a split window that means clicking into its pane. The app notes each click, so a quick look counts even if you move on right away. A blue session checks for that every second for the first 20 seconds, then every 4 seconds, and every 15 seconds once it has stayed blue for about 5 minutes. It only checks while it's blue. The app says which session it shows, not whether you're looking, so a session showing in a window behind another app counts as seen.
 - When a session starts again, its dot is matched to the app's record of its last turn. That also fixes a dot the mod missed, for example when the session's process stopped right after a turn.
-- A white dot left by an older version goes when that session's next turn starts, or 10 seconds after the session starts if no turn follows.
+- If a session stopped in the middle of a turn (its process ended, or the app closed and didn't pick the turn up again), its white dot goes when the session starts and no turn follows within 10 seconds.
 - The title moves over a little when its dot comes and goes.
 
 ## Privacy
@@ -83,9 +86,10 @@ Those are the only tools it calls. It runs no commands or programs and fetches n
 
 It hooks these events and passes each one on unchanged:
 
-- `turn.start` and `turn.complete`: the dot comes off while Claude works, then goes on as green, blue, yellow or red when the turn ends. Subagents' turns are skipped.
-- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
+- `turn.start` and `turn.complete`: the dot turns white while Claude works, then green, blue, yellow or red when the turn ends. Subagents' turns are skipped.
+- `tool.call`: yellow while `AskUserQuestion` or `ExitPlanMode` waits for you, and yellow at the end of a turn whose end-of-turn box (`wrap_up`) asks you something. Before a question or a plan goes on, it waits up to 300 ms for the dot to come off. It reads only each call's tool name and, for `wrap_up`, whether it asks you something. It never changes, blocks or answers a call.
 - `classic.Notification`: yellow when Claude Code reports that a permission prompt or a question is waiting for you.
+- `classic.Stop` and `classic.StopFailure`: take the dot off the title just before the turn ends, normally or on an error, so the app's end-of-turn notification shows the plain title. Each waits for that rename, 300 ms at most, and reads nothing from the event except whether a subagent sent it.
 - `session.start`: registers `/dots`, takes off a leftover dot when the dots are off, and otherwise matches the dot to the app's record of the last turn.
 
 It has no hook on permission checks, so it never takes part in a permission decision.
@@ -94,8 +98,7 @@ It has no hook on permission checks, so it never takes part in a permission deci
 
 - Tested on Windows only.
 - The app's record comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
-- A permission card may not turn the dot yellow. The app keeps those to itself, and the mod only hears of them if Claude Code reports them, which hasn't been seen live yet. While a card waits, the title can stay without a dot; the app's own dot turns yellow then.
-- The app heads its Windows notifications with the session's title, which has no dot while Claude works. A notification for a question or a plan can still show yellow, since that dot goes on as the question is asked. The line under the title is the app's own summary of the turn, and a mod can't change it.
+- The app heads its Windows notifications with the session's title. The dot comes off just before a turn ends and before a question or a plan goes up, so those notifications have no dot, and the title goes without one for a moment each time. A permission prompt's notification can still show the white dot, because the app reads the title as the prompt goes up, before a mod can change it. The line under the title is the app's own summary of the turn, which a mod can't change.
 
 ## Uninstall
 

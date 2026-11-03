@@ -41,6 +41,10 @@ type App = {
   calls?: number
   // Renames answer without saying which title they replaced.
   isTerse?: boolean
+  // The title at the moment the mod let the end of the turn go on.
+  stopTitle?: string
+  // Tool calls wait for this, as a call waits on a card you haven't answered.
+  toolHold?: Promise<void>
   // How many times the mod read the record file, and asked if the app shows the session.
   fileReads?: number
   layoutChecks?: number
@@ -144,6 +148,14 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('classic.Notification', () => ({}))
+  on('classic.Stop', () => {
+    app.stopTitle = app.title
+    return {}
+  })
+  on('classic.StopFailure', () => {
+    app.stopTitle = app.title
+    return {}
+  })
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -154,6 +166,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (e.tool === RENAME) app.title = String((e as { title?: unknown }).title)
     await flush()
     seen.push(app.title ?? '')
+    await app.toolHold
     return { result: 'ok' }
   })
   on('mcp.call', async (_, e) => {
@@ -233,18 +246,134 @@ const notify = async ($: Engine) => {
   await current.settle()
 }
 
-test('no dot while working, green when the turn ends with an answer', async ($, on) => {
+const stop = async ($: Engine, agentId?: string) => {
+  await $.classic.Stop({ stop_hook_active: false, ...(agentId ? { agent_id: agentId } : {}) })
+  await current.settle()
+}
+
+test('the dot is off the moment the turn ends, then the finished dot follows', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
   engine(on, app)
   await start($)
 
   await begin($)
+  await stop($)
+  expect(app.stopTitle).toBe('Fix the login bug')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fix the login bug')
+})
+
+test('a question in the next-step box still ends yellow after the dot comes off', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Ship the release', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', actions: [] })
+  await stop($)
+  expect(app.stopTitle).toBe('Ship the release')
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Ship the release')
+})
+
+test('the dot is off the moment an error ends the turn, then red follows', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await $.classic.StopFailure({ error: 'server_error' })
+  expect(app.stopTitle).toBe('Fix the login bug')
+  await end($, 'error')
+  expect(app.title).toBe('🔴 Fix the login bug')
+})
+
+test('a subagent stopping leaves the dot on', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stop($, 'worker')
+  expect(app.title).toBe('⚪ Fix the login bug')
+})
+
+test('a title you named is left alone at the end of a turn', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'My name', source: 'user', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stop($)
+  await end($, 'answer')
+  expect(app.renames).toEqual([])
+  expect(app.title).toBe('My name')
+})
+
+test('with the dots off, the end of a turn renames nothing', async ($, on) => {
+  sharedStore(on, { isOff: true })
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stop($)
+  await end($, 'answer')
+  expect(app.renames).toEqual([])
   expect(app.title).toBe('Fix the login bug')
+})
+
+test('a stuck rename holds the end of a turn for 300 ms at most', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+
+  app.isStuck = true
+  let isStopped = false
+  const stopped = $.classic.Stop({ stop_hook_active: false }).then(() => {
+    isStopped = true
+  })
+  await clock.advance(299)
+  expect(isStopped).toBe(false)
+  await clock.advance(1)
+  await stopped
+  expect(isStopped).toBe(true)
+})
+
+test('the white dot comes back if something keeps the turn going', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await stop($)
+  await tool($, { tool: 'Bash', command: 'npm test' })
+  expect(app.title).toBe('⚪ Fix the login bug')
+  await stop($)
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fix the login bug')
+})
+
+test('white while working, green when the turn ends with an answer', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('⚪ Fix the login bug')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Fix the login bug')
   await begin($)
-  expect(app.title).toBe('Fix the login bug')
+  expect(app.title).toBe('⚪ Fix the login bug')
 })
 
 test('yellow when the turn ends by asking you something', async ($, on) => {
@@ -305,7 +434,7 @@ test('a new turn while blue stops the check', async ($, on) => {
   await begin($)
   app.isOffScreen = false
   await clock.advance(10_000)
-  expect(app.title).toBe('Quick fix')
+  expect(app.title).toBe('⚪ Quick fix')
 })
 
 test('a blue dot turns green when you open the session after a restart', async ($, on) => {
@@ -485,10 +614,53 @@ test('yellow while a permission card is up, back to white once the call returns'
   await notify($)
   expect(app.title).toBe('🟡 Clean the build')
   await tool($, { tool: 'Bash', command: 'rm -rf dist' })
-  expect(app.title).toBe('Clean the build')
+  expect(app.title).toBe('⚪ Clean the build')
 })
 
-test('yellow while a question waits for your answer', async ($, on) => {
+test('a report of a card while a question is up keeps it yellow', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  const answer = gate()
+  app.toolHold = answer.held
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as unknown as Parameters<Engine['tool']['call']>[0])
+  await clock.advance(1000)
+  await notify($)
+  await clock.advance(5000)
+  expect(app.title).toBe('🟡 Pick a palette')
+  answer.open()
+  await asked
+  await clock.settle()
+  expect(app.title).toBe('⚪ Pick a palette')
+})
+
+test('a question goes up without a dot, then yellow while it waits for your answer', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const seen: string[] = []
+  const clock = engine(on, app, seen)
+  await start($)
+
+  await begin($)
+  const answer = gate()
+  app.toolHold = answer.held
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as unknown as Parameters<Engine['tool']['call']>[0])
+  await clock.settle()
+  expect(seen).toEqual(['Pick a palette'])
+  await clock.advance(999)
+  expect(app.title).toBe('Pick a palette')
+  await clock.advance(1)
+  expect(app.title).toBe('🟡 Pick a palette')
+  answer.open()
+  await asked
+  await clock.settle()
+  expect(app.title).toBe('⚪ Pick a palette')
+})
+
+test('a plan to approve goes up without a dot too', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
   const seen: string[] = []
@@ -496,20 +668,97 @@ test('yellow while a question waits for your answer', async ($, on) => {
   await start($)
 
   await begin($)
+  await tool($, { tool: 'ExitPlanMode' })
+  expect(seen).toEqual(['Pick a palette'])
+  expect(app.title).toBe('⚪ Pick a palette')
+})
+
+test('a question answered at once leaves the dot white', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
   await tool($, { tool: 'AskUserQuestion', questions: [] })
-  expect(seen).toEqual(['🟡 Pick a palette'])
+  await clock.advance(5000)
+  expect(app.renames).toEqual(['⚪ Pick a palette', 'Pick a palette', '⚪ Pick a palette'])
+})
+
+test('a stuck rename holds a question for 300 ms at most', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const seen: string[] = []
+  const clock = engine(on, app, seen)
+  await start($)
+  await begin($)
+
+  app.isStuck = true
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as unknown as Parameters<Engine['tool']['call']>[0])
+  await clock.advance(299)
+  expect(seen).toEqual([])
+  await clock.advance(1)
+  await asked
+  expect(seen.length).toBe(1)
+})
+
+test('a turn stopped while a question is up never turns yellow after it', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  const answer = gate()
+  app.toolHold = answer.held
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as unknown as Parameters<Engine['tool']['call']>[0])
+  await clock.settle()
+  await end($, 'aborted')
+  answer.open()
+  await asked
+  await clock.advance(5000)
   expect(app.title).toBe('Pick a palette')
+})
+
+test('with the dots off, a question renames nothing', async ($, on) => {
+  sharedStore(on, { isOff: true })
+  const app: App = { title: 'Pick a palette', source: 'auto', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'AskUserQuestion', questions: [] })
+  await clock.advance(5000)
+  expect(app.renames).toEqual([])
+})
+
+test('a title you named is left alone at a question', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'My name', source: 'user', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'AskUserQuestion', questions: [] })
+  await clock.advance(5000)
+  expect(app.renames).toEqual([])
 })
 
 test('an answered question clears its yellow dot even when the mod loaded mid-turn', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Loaded late', source: 'tool', renames: [] }
-  engine(on, app)
+  const clock = engine(on, app)
   await start($)
 
-  await tool($, { tool: 'AskUserQuestion', questions: [] })
-  expect(app.title).toBe('Loaded late')
-  expect(app.renames).toEqual(['🟡 Loaded late', 'Loaded late'])
+  const answer = gate()
+  app.toolHold = answer.held
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as unknown as Parameters<Engine['tool']['call']>[0])
+  await clock.advance(1000)
+  answer.open()
+  await asked
+  await clock.settle()
+  expect(app.title).toBe('⚪ Loaded late')
+  expect(app.renames).toEqual(['🟡 Loaded late', '⚪ Loaded late'])
 })
 
 test("a subagent's turns leave the session's dot alone", async ($, on) => {
@@ -521,7 +770,7 @@ test("a subagent's turns leave the session's dot alone", async ($, on) => {
   await begin($)
   await begin($, 'agent-1')
   await end($, 'answer', 'agent-1')
-  expect(app.title).toBe('Review the PR')
+  expect(app.title).toBe('⚪ Review the PR')
 })
 
 test('a title you set yourself is left alone, and why is said once ever', async ($, on) => {
@@ -564,31 +813,16 @@ test('a yellow dot stays when the session starts again, since it still needs you
   expect(app.renames).toEqual([])
 })
 
-test('a white dot from an older version comes off when a turn starts', async ($, on) => {
+test("0.1.0's white dot now reads as working and gives way when the turn ends", async ($, on) => {
   mock.store(on)
   const app: App = { title: '⚪ Old suggestion', source: 'tool', renames: [] }
   engine(on, app)
   await start($)
 
   await begin($)
-  expect(app.title).toBe('Old suggestion')
+  expect(app.title).toBe('⚪ Old suggestion')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Old suggestion')
-})
-
-test('the title has no dot from the start of a turn to its end', async ($, on) => {
-  mock.store(on)
-  const seen: string[] = []
-  const app: App = { title: '🟢 Fix the login bug', source: 'tool', renames: [] }
-  engine(on, app, seen)
-  await start($)
-
-  await begin($)
-  expect(app.title).toBe('Fix the login bug')
-  await tool($, { tool: 'Bash', command: 'npm test' })
-  expect(seen).toEqual(['Fix the login bug'])
-  await end($, 'answer')
-  expect(app.title).toBe('🟢 Fix the login bug')
 })
 
 test('a green dot stays when the session starts again', async ($, on) => {
@@ -819,7 +1053,7 @@ test("a next-step question seen by a reloaded copy of the mod still turns the do
   expect(app.title).toBe('🟡 Nexus draft')
 })
 
-test('a reload in the middle of a turn leaves the title alone', async ($, on) => {
+test("a reload in the middle of a turn doesn't take the white dot off", async ($, on) => {
   mock.store(on)
   sharedState(on, { turn: { isWorking: true, isAsking: false } })
   const app: App = { title: '⚪ Long turn', source: 'tool', renames: [] }
@@ -866,7 +1100,7 @@ test('a new turn stops the verdict check of the one before', async ($, on) => {
   await begin($)
   app.record = summed('completed', 'a2', ASKED)
   await clock.advance(10_000)
-  expect(app.title).toBe('Quick turns')
+  expect(app.title).toBe('⚪ Quick turns')
 })
 
 test('a turn whose end was missed gets its dot when the session starts again', async ($, on) => {
@@ -877,7 +1111,7 @@ test('a turn whose end was missed gets its dot when the session starts again', a
   expect(app.title).toBe('🟡 Missed end')
 })
 
-test('a white dot from an older version goes when no turn picks it up', async ($, on) => {
+test('a white dot left by a run that stopped mid-turn goes when no turn picks it up', async ($, on) => {
   mock.store(on)
   const app: App = { title: '⚪ Stopped mid-turn', source: 'tool', renames: [] }
   const clock = engine(on, app)
@@ -887,14 +1121,14 @@ test('a white dot from an older version goes when no turn picks it up', async ($
   expect(app.title).toBe('Stopped mid-turn')
 })
 
-test('a white dot from an older version comes off when the turn picks up after a restart', async ($, on) => {
+test('a white dot stays when the turn picks up again after a restart', async ($, on) => {
   mock.store(on)
   const app: App = { title: '⚪ Resumed', source: 'tool', renames: [] }
   const clock = engine(on, app)
   await start($)
   await begin($)
   await clock.advance(20_000)
-  expect(app.title).toBe('Resumed')
+  expect(app.title).toBe('⚪ Resumed')
 })
 
 test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
@@ -933,7 +1167,7 @@ test('a stuck title read times out, and the dots after it still work', async ($,
   await clock.advance(10_000)
   app.isStuckReading = false
   await clock.advance(1_000)
-  expect(app.title).toBe('Stuck once')
+  expect(app.title).toBe('⚪ Stuck once')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Stuck once')
 })
@@ -1083,7 +1317,7 @@ test('Claude renaming this session keeps the new name and its dot', async ($, on
 
   await begin($)
   await tool($, { tool: RENAME, session_id: 'self', title: 'Release notes' })
-  expect(app.title).toBe('Release notes')
+  expect(app.title).toBe('⚪ Release notes')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Release notes')
 })
@@ -1099,7 +1333,7 @@ test("a write that can't reach the app yet is tried again a second later", async
   expect(app.title).toBe('Cold start')
   app.isConnecting = false
   await clock.advance(1_000)
-  expect(app.title).toBe('Cold start')
+  expect(app.title).toBe('⚪ Cold start')
 })
 
 test('blue turns green within a second of opening the session', async ($, on) => {
@@ -1156,11 +1390,10 @@ test("a rename answer that doesn't name the old title means a fresh read next ti
   await start($)
 
   await begin($)
-  await end($, 'answer')
   const reads = app.reads ?? 0
-  await begin($)
+  await end($, 'answer')
   expect(app.reads).toBe(reads + 1)
-  expect(app.title).toBe('Terse')
+  expect(app.title).toBe('🟢 Terse')
 })
 
 test('a blue dot checks less often the longer it stays blue', async ($, on) => {

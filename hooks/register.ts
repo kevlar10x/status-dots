@@ -9,21 +9,22 @@ import type { Turn } from '../types'
 // a refusal stopped Claude, yellow when something on screen waits for you (a
 // question, a plan or a permission card, or a question in the next-step box),
 // blue when it finished while you weren't looking, green once you've seen it
-// and it needs nothing from you. While Claude works the title has no dot: the
-// app's grey dot already says so, and the app heads its Windows notifications
-// with the title. The desktop app gives mods no way to recolor its own sidebar
-// dot, so the title carries it. A title you typed yourself is yours: the app
-// won't let anything but an approved rename change it, so that session gets no
-// dot.
+// and it needs nothing from you, white while Claude works. The desktop app
+// gives mods no way to recolor its own sidebar dot, so the title carries it. A
+// title you typed yourself is yours: the app won't let anything but an
+// approved rename change it, so that session gets no dot.
 //
-// Hooks never wait for the title: they set the dot they want and pass their
-// event straight on, and the title catches up a moment later.
+// Hooks don't wait for the title: they set the dot they want and pass their
+// event straight on, and the title catches up a moment later. The app heads its
+// Windows notifications with the title, so the end of a turn, a question and a
+// plan are the exceptions: the dot comes off first, and the notification comes
+// without one.
 
 type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 
 // Yellow is the app's own color for a session that needs input, blue its color
-// for one with something you haven't seen. White is never written: it's here so
-// a title left with one by an older version is recognized and cleaned up.
+// for one with something you haven't seen. White is the nearest emoji to the
+// app's grey working dot.
 const DOTS: Record<Status, string> = { working: '⚪', waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
 const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
 const SESSIONS = 'ccd_session_mgmt'
@@ -52,6 +53,11 @@ const VERDICT_TRIES = 15
 // An app call that hasn't answered by then counts as failed, so one stuck call
 // can't hold up every dot after it.
 const CALL_TIMEOUT_MS = 10000
+// The longest the end of a turn or a question waits for the dot to come off.
+const CLEAR_MS = 300
+// How long a question's title stays bare, so its notification is out before
+// yellow goes on.
+const YELLOW_DELAY_MS = 1000
 // Tools that stop for you whatever the permission mode.
 const ASKS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 // The app's end-of-turn box; with an `ask` it shows a question and buttons.
@@ -90,6 +96,10 @@ let hasTurned = false
 let finishedAt: number | undefined
 // Counts the main loop's turns, so a check started for one turn knows when another began.
 let turnCount = 0
+// The dot came off for the end of a turn that hasn't ended yet.
+let isCleared = false
+// The dot came off for a question, and this brings yellow in behind it.
+let yellowSoon: Timer | undefined
 // After a turn: the next look for the app's verdict on it.
 let verdictCheck: Timer | undefined
 let sessionId: string | undefined
@@ -160,7 +170,7 @@ function statusOf(title: string): Status | undefined {
 
 function dotted(title: string, status: Status | undefined) {
   const bare = title.replace(DOT, '')
-  return status === undefined || status === 'working' ? bare : `${DOTS[status]} ${bare}`
+  return status === undefined ? bare : `${DOTS[status]} ${bare}`
 }
 
 // The app answers a rename with `Renamed this session to "new" (was "old").`
@@ -450,9 +460,37 @@ async function explainOnce($: Engine) {
 
 // Sets the dot this session should show and starts writing it.
 function show($: Engine, status: Status | undefined) {
+  stopYellowSoon()
   wanted = isOff ? undefined : status
   writeTries = 0
   void paint($)
+}
+
+function stopYellowSoon() {
+  yellowSoon?.cancel()
+  yellowSoon = undefined
+}
+
+// The app heads a notification with the title it holds as the notification
+// goes out, so the dot comes off just before that.
+async function clearDot($: Engine) {
+  wanted = undefined
+  writeTries = 0
+  await Promise.race([paint($), $.clock.sleep(CLEAR_MS)])
+}
+
+// The turn is ending: the finished dot follows when it has.
+async function clearForEnd($: Engine) {
+  isCleared = true
+  await clearDot($)
+}
+
+// A question or a plan is about to stop for you: yellow follows once it's on
+// screen.
+async function clearForQuestion($: Engine) {
+  stopYellowSoon()
+  await clearDot($)
+  yellowSoon = $.clock.after(YELLOW_DELAY_MS, () => show($, 'waiting'))
 }
 
 // Takes the dot off every other session the app lists, archived ones too, so
@@ -573,7 +611,8 @@ function stopWatching() {
 // for a while, until a turn starts and takes over.
 async function checkAtStart($: Engine, triesLeft: number) {
   if (hasTurned) return
-  // A reload in the middle of a turn fires this again, and the turn goes on.
+  // A reload in the middle of a turn fires this again: the turn goes on, and
+  // its white dot isn't one left from a run that stopped.
   const held = await heldTurn($)
   if (held?.isAsking) isAsking = true
   if (held?.isWorking) {
@@ -601,9 +640,9 @@ async function checkAtStart($: Engine, triesLeft: number) {
   if (wanted === 'waiting' && record?.turnWrapUp !== undefined) isAsking = true
   if (verdict === 'finished' && !keepsFinishedDot()) return showFinished($)
   if (verdict !== undefined) applyVerdict($, verdict)
-  // A white dot is left by an older version, from a run that stopped mid-turn: the
-  // process ended, or the app closed without picking the turn up again. A turn
-  // that resumes takes over within moments; if none does, the dot goes.
+  // A white dot with no turn behind it is left from a run that stopped mid-turn:
+  // the process ended, or the app closed without picking the turn up again. A
+  // turn that resumes takes over within moments; if none does, the dot goes.
   if (wanted === 'working') {
     $.clock.after(STALE_WORKING_MS, () => {
       if (!hasTurned && wanted === 'working') show($, undefined)
@@ -619,7 +658,7 @@ async function checkAtStart($: Engine, triesLeft: number) {
 // Back to working once nothing waits on you. Tool calls only return inside a
 // turn, so this needs no turn of its own to have been seen.
 function resume($: Engine) {
-  if (questions === 0 && wanted === 'waiting') show($, 'working')
+  if (questions === 0 && (wanted === 'waiting' || yellowSoon !== undefined)) show($, 'working')
 }
 
 // Another session may have turned the dots off since this one last looked.
@@ -644,6 +683,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       questions = 0
       isAsking = false
+      isCleared = false
       holdTurn($, { isWorking: true, isAsking: false })
       stopWatching()
       stopFollowing()
@@ -656,10 +696,25 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Runs before the app hears that the turn has ended, so this one hook waits
+  // for the title.
+  on('classic.Stop', async ($, e, next) => {
+    if (e.agent_id === undefined) await clearForEnd($)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.StopFailure', async ($, e, next) => {
+    if (e.agent_id === undefined) await clearForEnd($)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
     finishedAt = await $.clock.now()
+    isCleared = false
     // A copy of the mod reloaded mid-turn may have seen the question instead.
     if ((await heldTurn($))?.isAsking) isAsking = true
     holdTurn($, { isWorking: false, isAsking })
@@ -674,8 +729,10 @@ export const register: Register = on => {
     return result
   })
 
-  // A permission prompt or a question is waiting for you. There's no hook on
-  // the permission check itself: the Claude directory accepts one there only
+  // A permission prompt or a question is waiting for you. Claude Code reports
+  // it a few seconds after it goes up, once the app's notification is out. A
+  // hook on the permission check itself runs alongside the prompt, too late to
+  // take the dot off first, and the Claude directory accepts one there only
   // when it does nothing but pass the event on.
   on('classic.Notification', ($, e, next) => {
     if (e.notification_type === 'permission_prompt' || e.notification_type === 'elicitation_dialog') {
@@ -689,6 +746,11 @@ export const register: Register = on => {
   // call returning moves an answered permission card back to working. When
   // Claude renames this session, the mod reads the new name before its next dot.
   on('tool.call', async ($, e, next) => {
+    // Another mod's Stop hook can keep a turn going after its dot came off.
+    if (isCleared && e.agentId === undefined) {
+      isCleared = false
+      show($, 'working')
+    }
     if (e.tool === WRAP_UP && e.agentId === undefined) {
       const ask = (e as { ask?: unknown }).ask
       if (typeof ask === 'string' && ask.trim() !== '') {
@@ -697,11 +759,9 @@ export const register: Register = on => {
       }
     }
     const isQuestion = ASKS.has(e.tool)
-    if (isQuestion) {
-      questions += 1
-      show($, 'waiting')
-    }
+    if (isQuestion) questions += 1
     try {
+      if (isQuestion) await clearForQuestion($)
       return await next(e)
     } finally {
       if (isQuestion) questions -= 1

@@ -2,6 +2,13 @@
 
 Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
 
+## 0.6.9 - 2026-11-03
+
+- The white dot is back while Claude works. 0.6.8 had taken it out of the sidebar as well as the notifications.
+- Windows notifications for a question or a plan to approve no longer show a dot. The dot comes off just before it goes up, and yellow follows a second later.
+- A turn that ends on an error clears its dot before the notification too.
+- Notifications for permission prompts can still show the white dot. The app reads the title as the prompt goes up, before a mod can change it.
+
 ## 0.6.8 - 2026-11-02
 
 - Titles have no dot while Claude works, so the white dot no longer shows up in Windows notifications, which use the title. The app's own dot shows that a session is working.
