@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
 
+## 0.7.1 - 2026-11-04
+
+- A reply that's only a dot (`.`, `·` or `…`) now leaves the dot as it was before that turn. A session that answers its own wake-ups with a dot, such as another session's report, stays green instead of turning blue each time. The dot is still white while such a turn runs.
+
 ## 0.7.0 - 2026-11-03
 
 - A turn that ends while background work is still running (a subagent, a command, a monitor) keeps the white dot. It goes green or blue once that work has reported back and Claude finishes with nothing left running.

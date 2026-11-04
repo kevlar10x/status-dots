@@ -85,6 +85,9 @@ const RENAME = `mcp__${SESSIONS}__set_session_title`
 const SESSION_ID = /^local_[\w-]+$/
 // How background work that has ended may still be listed.
 const ENDED = new Set(['completed', 'failed', 'killed'])
+// A reply of nothing but a dot or two: Claude had nothing to say, often to
+// something that woke it on its own, such as another session's report.
+const FILLER = /^[.·…]+$/u
 // The current turn, held by the host. A reload of the mod's code in the middle
 // of a turn (an update, a dev folder's hot reload) starts a new copy with
 // nothing in memory, and the turn's end can still reach the old copy while
@@ -123,6 +126,11 @@ let isCleared = false
 // last turn ended. It reports back in a turn of its own, so the session is
 // still working until then.
 let hasTasks = false
+// The dot from before this turn, put back if the turn ends with nothing to
+// say. In a process that has just started it's known once the title is read.
+let dotBefore: Status | undefined
+let isDotBeforeKnown = false
+let wasAsking = false
 // The dot came off for a question, and this brings yellow in behind it.
 let yellowSoon: Timer | undefined
 // After a turn: the next look for the app's verdict on it.
@@ -186,6 +194,10 @@ async function titleOf($: Engine) {
   const session = JSON.parse(textOf(result)) as { title?: string; sessionId?: string }
   if (SESSION_ID.test(session.sessionId ?? '')) sessionId ??= session.sessionId
   knownTitle = session.title?.trim() ?? ''
+  if (!isDotBeforeKnown) {
+    dotBefore = statusOf(knownTitle)
+    isDotBeforeKnown = true
+  }
   return knownTitle
 }
 
@@ -718,6 +730,10 @@ export const register: Register = on => {
 
   on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) {
+      wasAsking = isAsking
+      isDotBeforeKnown = waits.size > 0 || wanted !== undefined || knownTitle !== undefined
+      // Yellow for a wait still out isn't put back: the turn finishes as usual.
+      dotBefore = waits.size > 0 ? 'working' : wanted ?? (knownTitle === undefined ? undefined : statusOf(knownTitle))
       isAsking = false
       isCleared = false
       hasTasks = false
@@ -753,10 +769,20 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
-    finishedAt = await $.clock.now()
     isCleared = false
     // A copy of the mod reloaded mid-turn may have seen the question instead.
     if ((await heldTurn($))?.isAsking) isAsking = true
+    // A reply of only a dot puts back the dot from before the turn, unless the
+    // turn asks you something or left work running.
+    if (e.reason === 'answer' && !isAsking && !hasTasks && isDotBeforeKnown && dotBefore !== 'working' && FILLER.test(e.answer.trim())) {
+      isAsking = wasAsking
+      holdTurn($, { isWorking: false, isAsking })
+      // Blue stays until you've opened the session since its last real finish.
+      if (dotBefore === 'fresh') void showFinished($)
+      else show($, dotBefore)
+      return result
+    }
+    finishedAt = await $.clock.now()
     holdTurn($, hasTasks ? { isWorking: false, isAsking, hasTasks } : { isWorking: false, isAsking })
     // An answer whose next-step box asks you something leaves it your turn. A
     // question only in the reply's text doesn't: nothing on screen waits for you.

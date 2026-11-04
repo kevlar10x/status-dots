@@ -1416,6 +1416,156 @@ test("another call returning in a question's first second doesn't bring yellow e
   expect(app.title).toBe('⚪ Pick a palette')
 })
 
+for (const answer of ['.', '·', ' … ']) {
+  test(`a reply of only ${JSON.stringify(answer)} keeps the green dot`, async ($, on) => {
+    mock.store(on)
+    const app: App = { title: '🟢 Hub', source: 'tool', renames: [], isOffScreen: true }
+    const clock = engine(on, app)
+    await start($)
+
+    await begin($)
+    expect(app.title).toBe('⚪ Hub')
+    await stop($)
+    await end($, 'answer', undefined, answer)
+    await clock.advance(60_000)
+    expect(app.title).toBe('🟢 Hub')
+  })
+}
+
+test('a reply with words in it still finishes as usual', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Hub', source: 'tool', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer', undefined, 'Done.')
+  await clock.advance(1_000)
+  expect(app.title).toBe('🔵 Hub')
+})
+
+test('a dot reply keeps blue until you open the session, and a click during it counts', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], isOffScreen: true, record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await clock.advance(1_000)
+  await end($, 'answer')
+  expect(app.title).toBe('🔵 Hub')
+  await clock.advance(60_000)
+  await begin($)
+  await end($, 'answer', undefined, '·')
+  await clock.advance(30_000)
+  expect(app.title).toBe('🔵 Hub')
+
+  // Clicked while the next dot reply ran.
+  await begin($)
+  app.record = { lastFocusedAt: 92_000 }
+  await clock.advance(1_000)
+  await end($, 'answer', undefined, '·')
+  expect(app.title).toBe('🟢 Hub')
+})
+
+test('a dot reply keeps the yellow of a question still in the next-step box', async ($, on) => {
+  mock.store(on)
+  const held = sharedState(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await end($, 'answer')
+  expect(app.title).toBe('🟡 Hub')
+  await begin($)
+  await end($, 'answer', undefined, '.')
+  await clock.advance(60_000)
+  expect(app.title).toBe('🟡 Hub')
+  expect(held.turn).toEqual({ isWorking: false, isAsking: true })
+})
+
+test('a dot reply keeps red after an error', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'error')
+  expect(app.title).toBe('🔴 Hub')
+  await begin($)
+  await end($, 'answer', undefined, '.')
+  await clock.advance(60_000)
+  expect(app.title).toBe('🔴 Hub')
+})
+
+test('a dot reply with background work still running stays white, and finishes once it has reported', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Hub', source: 'tool', renames: [], isOffScreen: true }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await stopWith($, [TASK])
+  await end($, 'answer', undefined, '·')
+  expect(app.title).toBe('⚪ Hub')
+  await begin($)
+  await stopWith($, [])
+  await end($, 'answer', undefined, '·')
+  await clock.advance(1_000)
+  expect(app.title).toBe('🔵 Hub')
+})
+
+test("a dot reply doesn't bring back yellow for a subagent's question answered during it", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Hub', source: 'tool', renames: [] }
+  const clock = engine(on, app)
+  await start($)
+
+  const asked = waitOn($, app, { tool: 'AskUserQuestion', agentId: 'sub', questions: [] })
+  await clock.advance(1000)
+  expect(app.title).toBe('🟡 Hub')
+  await begin($)
+  asked.open()
+  await asked.call
+  await clock.settle()
+  await end($, 'answer', undefined, '·')
+  await clock.advance(1000)
+  expect(app.title).toBe('🟢 Hub')
+})
+
+test("a dot reply whose old dot was never read finishes as usual", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Hub', source: 'tool', renames: [], isOffScreen: true, isConnecting: true }
+  const clock = engine(on, app)
+  await start($)
+
+  // The app's tools only connect once the turn is over.
+  await begin($)
+  await end($, 'answer', undefined, '·')
+  app.isConnecting = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('🔵 Hub')
+})
+
+test("a dot reply in a process that just started keeps the title's dot", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟢 Hub', source: 'tool', renames: [], isOffScreen: true, isConnecting: true }
+  const clock = engine(on, app)
+  await start($)
+
+  // The wake-up's turn starts before the app's tools have connected.
+  await begin($)
+  app.isConnecting = false
+  await clock.advance(1_000)
+  expect(app.title).toBe('⚪ Hub')
+  await end($, 'answer', undefined, '·')
+  await clock.advance(60_000)
+  expect(app.title).toBe('🟢 Hub')
+})
+
 test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
   mock.store(on)
   const app: App = { title: '🟡 btt', source: 'tool', renames: [], record: summed('blocked') }
