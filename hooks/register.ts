@@ -53,6 +53,10 @@ const VERDICT_TRIES = 15
 // An app call that hasn't answered by then counts as failed, so one stuck call
 // can't hold up every dot after it.
 const CALL_TIMEOUT_MS = 10000
+// The first look at the files of sessions past the app's list goes back this far.
+const FIRST_LOOK_MS = 24 * 60 * 60 * 1000
+// Another session's file, named by its id.
+const RECORD_FILE = /^(local_[\w-]+)\.json$/
 // The longest the end of a turn or a question waits for the dot to come off.
 const CLEAR_MS = 300
 // How long a question's title stays bare, so its notification is out before
@@ -136,6 +140,10 @@ let wasAsking = false
 let wasBlocking = false
 // Other sessions' records found to need no change, by the file's time.
 const settled = new Map<string, number>()
+// When the sweep last looked at the files of sessions past the app's list, and
+// the ones it found running there, to look at again.
+let lookedAt: number | undefined
+const running = new Set<string>()
 // The dot came off for a question, and this brings yellow in behind it.
 let yellowSoon: Timer | undefined
 // After a turn: the next look for the app's verdict on it.
@@ -164,6 +172,9 @@ type AppRecord = {
   // When you last clicked the session, and when its last turn began or ended.
   lastFocusedAt?: unknown
   lastTurnEdgeAt?: unknown
+  // Read only from other sessions' files.
+  title?: unknown
+  isArchived?: unknown
 }
 type Verdict = 'waiting' | 'failed' | 'finished'
 
@@ -538,29 +549,75 @@ async function clearForQuestion($: Engine) {
   yellowSoon = $.clock.after(YELLOW_DELAY_MS, () => show($, 'waiting'))
 }
 
-// Takes the dot off every other session the app lists, archived ones too, so
-// turning the dots off (before an uninstall, say) leaves none behind.
-async function clearOthers($: Engine) {
-  const listed = await call($, SESSIONS, 'list_sessions', { limit: 200, include_archived: true })
-  if (listed.isError) return 0
-  const sessions = JSON.parse(textOf(listed)) as { sessionId: string; title?: string }[]
-  let cleared = 0
-  for (const session of sessions) {
-    const title = session.title?.trim() ?? ''
-    // A title you named yourself is yours, a dot in front included: renaming
-    // it would put up an approval card for each one.
-    if (!DOT.test(title) || (await isOtherNamedByYou($, session.sessionId))) continue
+type Listed = { sessionId?: string; title?: string; isRunning?: boolean }
+
+// The app's list of other sessions, newest first, and whether it holds them all.
+// Claude Code passes on no tool answer past a set size: a long list comes back
+// as a note saying so, and a shorter one is tried after it.
+async function listOthers($: Engine, limits: number[], args: Record<string, unknown> = {}) {
+  for (const limit of limits) {
+    const listed = await call($, SESSIONS, 'list_sessions', { ...args, limit })
+    if (listed.isError) return undefined
     try {
-      const result = await call($, SESSIONS, 'set_session_title', {
-        session_id: session.sessionId,
-        title: title.replace(DOT, ''),
-      })
-      if (!result.isError) cleared += 1
-    } catch (error) {
-      // Held on an approval card: the rest would each put up another.
-      if (error instanceof TimedOut) break
-      throw error
+      const sessions: unknown = JSON.parse(textOf(listed))
+      if (Array.isArray(sessions)) return { sessions: sessions as Listed[], isAll: sessions.length < limit }
+    } catch {
+      // Too long to pass on.
     }
+  }
+  return undefined
+}
+
+// The other sessions' files in the app's data folder, next to this one's, with
+// their times, apart from the ones named.
+async function otherFiles($: Engine, skip: Set<string>) {
+  const path = await findRecord($)
+  if (path === undefined) return []
+  const folder = path.slice(0, path.lastIndexOf('/'))
+  const files: { id: string; file: string; mtimeMs: number }[] = []
+  for (const entry of await $.fs.list(folder)) {
+    const id = RECORD_FILE.exec(entry.name)?.[1]
+    if (entry.kind !== 'file' || id === undefined || id === sessionId || skip.has(id)) continue
+    files.push({ id, file: `${folder}/${entry.name}`, mtimeMs: entry.mtimeMs })
+  }
+  return files
+}
+
+async function clearOne($: Engine, id: string, title: string) {
+  const result = await call($, SESSIONS, 'set_session_title', { session_id: id, title: title.replace(DOT, '') })
+  return !result.isError
+}
+
+// Takes the dot off every other session, archived ones too, so turning the dots
+// off (before an uninstall, say) leaves none behind. Sessions too far down the
+// app's list for it to pass on are found from their files.
+async function clearOthers($: Engine) {
+  const listed = await listOthers($, [200, 100, 50, 20], { include_archived: true })
+  if (listed === undefined) return 0
+  let cleared = 0
+  try {
+    for (const session of listed.sessions) {
+      const id = session.sessionId ?? ''
+      const title = session.title?.trim() ?? ''
+      // A title you named yourself is yours, a dot in front included: renaming
+      // it would put up an approval card for each one.
+      if (!DOT.test(title) || (await isOtherNamedByYou($, id))) continue
+      if (await clearOne($, id, title)) cleared += 1
+    }
+    if (listed.isAll) return cleared
+    for (const { id, file } of await otherFiles($, new Set(listed.sessions.map(session => session.sessionId ?? '')))) {
+      let record: AppRecord
+      try {
+        record = JSON.parse(await $.fs.read(file)) as AppRecord
+      } catch {
+        continue
+      }
+      const title = typeof record.title === 'string' ? record.title.trim() : ''
+      if (DOT.test(title) && record.titleSource !== 'user' && (await clearOne($, id, title))) cleared += 1
+    }
+  } catch (error) {
+    // Held on an approval card: the rest would each put up another.
+    if (!(error instanceof TimedOut)) throw error
   }
   return cleared
 }
@@ -733,6 +790,21 @@ async function checkAtStart($: Engine, triesLeft: number) {
   } else watchUntilSeen($, true)
 }
 
+// Whether another session's dot can turn green, from its file: you've clicked
+// it since its last turn, you didn't name it yourself (that rename would put up
+// an approval card), and a yellow dot came from a question in the next-step box
+// that didn't stop the work.
+function isSettleable(record: AppRecord, status: Status | undefined) {
+  const { lastFocusedAt, lastTurnEdgeAt, turnWrapUp } = record
+  const isSeen = typeof lastFocusedAt === 'number' && typeof lastTurnEdgeAt === 'number' && lastFocusedAt > lastTurnEdgeAt
+  const isQuestion = typeof turnWrapUp === 'object' && turnWrapUp !== null && !turnWrapUp.needsUser
+  return isSeen && record.titleSource !== 'user' && (status === 'fresh' || (status === 'waiting' && isQuestion))
+}
+
+async function settle($: Engine, id: string, title: string) {
+  await call($, SESSIONS, 'set_session_title', { session_id: id, title: dotted(title, 'done') })
+}
+
 // A session with no process running can't follow your clicks, so one that runs
 // does it for the others: a blue dot, or yellow for a question in the
 // next-step box that didn't stop the work, turns green once you've opened
@@ -741,34 +813,66 @@ async function settleOthers($: Engine) {
   if (isOff) return
   const path = await findRecord($)
   if (path === undefined) return
-  // The list runs newest first, and a session left yellow days ago is far down it.
-  const listed = await call($, SESSIONS, 'list_sessions', { limit: 200 })
-  if (listed.isError || isOff) return
+  const startedAt = await $.clock.now()
+  const listed = await listOthers($, [50, 20])
+  if (listed === undefined || isOff) return
   const folder = path.slice(0, path.lastIndexOf('/'))
-  const sessions = JSON.parse(textOf(listed)) as { sessionId?: string; title?: string; isRunning?: boolean }[]
-  for (const session of sessions) {
-    const id = session.sessionId ?? ''
-    const title = session.title?.trim() ?? ''
-    const status = statusOf(title)
-    // A session whose process runs looks after its own dot. The id becomes
-    // part of a file path, so one of another shape is left alone.
-    if (session.isRunning !== false || (status !== 'fresh' && status !== 'waiting') || !SESSION_ID.test(id)) continue
-    const file = `${folder}/${id}.json`
+  try {
+    for (const session of listed.sessions) {
+      const id = session.sessionId ?? ''
+      const title = session.title?.trim() ?? ''
+      const status = statusOf(title)
+      // A session whose process runs looks after its own dot. The id becomes
+      // part of a file path, so one of another shape is left alone.
+      if (session.isRunning !== false || (status !== 'fresh' && status !== 'waiting') || !SESSION_ID.test(id)) continue
+      const file = `${folder}/${id}.json`
+      try {
+        const { mtimeMs } = await $.fs.stat(file)
+        if (settled.get(id) === mtimeMs) continue
+        const record = JSON.parse(await $.fs.read(file)) as AppRecord
+        if (isSettleable(record, status)) await settle($, id, title)
+        else settled.set(id, mtimeMs)
+      } catch (error) {
+        if (error instanceof TimedOut) throw error
+      }
+    }
+    if (!listed.isAll) await settleOlder($, new Set(listed.sessions.map(session => session.sessionId ?? '')), startedAt)
+    lookedAt = startedAt
+  } catch (error) {
+    // Held on an approval card: the rest would each put up another.
+    if (!(error instanceof TimedOut)) throw error
+  }
+}
+
+// Sessions too far down the list for the app to pass on. Their files are read
+// once they've changed since the last look (a click writes one), going back a
+// day the first time, and the app says whether each one is running.
+async function settleOlder($: Engine, listed: Set<string>, startedAt: number) {
+  const since = lookedAt ?? startedAt - FIRST_LOOK_MS
+  for (const { id, file, mtimeMs } of await otherFiles($, listed)) {
+    if (settled.get(id) === mtimeMs || (mtimeMs <= since && !running.has(id))) continue
     try {
-      const { mtimeMs } = await $.fs.stat(file)
-      if (settled.get(id) === mtimeMs) continue
       const record = JSON.parse(await $.fs.read(file)) as AppRecord
-      const isSeen = typeof record.lastFocusedAt === 'number' && typeof record.lastTurnEdgeAt === 'number' && record.lastFocusedAt > record.lastTurnEdgeAt
-      const isQuestion = record.turnWrapUp !== undefined && !record.turnWrapUp.needsUser
-      // A title you named yourself is left alone, so no approval card goes up.
-      if (!isSeen || record.titleSource === 'user' || (status === 'waiting' && !isQuestion)) {
+      const title = typeof record.title === 'string' ? record.title.trim() : ''
+      const status = statusOf(title)
+      if (record.isArchived === true || !isSettleable(record, status)) {
         settled.set(id, mtimeMs)
+        running.delete(id)
         continue
       }
-      await call($, SESSIONS, 'set_session_title', { session_id: id, title: dotted(title, 'done') })
+      const answer = await call($, SESSIONS, 'get_session', { session_id: id })
+      if (answer.isError) continue
+      const session = JSON.parse(textOf(answer)) as Listed
+      if (session.isRunning !== false) {
+        running.add(id)
+        continue
+      }
+      running.delete(id)
+      // The title as the app has it now, which the file may not have caught up with.
+      const now = session.title?.trim() ?? ''
+      if (statusOf(now) === status) await settle($, id, now)
     } catch (error) {
-      // Held on an approval card: the rest would each put up another.
-      if (error instanceof TimedOut) return
+      if (error instanceof TimedOut) throw error
     }
   }
 }

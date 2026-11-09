@@ -11,7 +11,7 @@ type App = {
   title?: string
   source: 'auto' | 'tool' | 'user'
   renames: string[]
-  others?: { sessionId: string; title: string; isRunning?: boolean }[]
+  others?: { sessionId: string; title: string; isRunning?: boolean; isArchived?: boolean }[]
   // Whether the app shows this session in a window; shown unless a test says not.
   isOffScreen?: boolean
   // The window is split and another session's pane has the focus.
@@ -33,6 +33,10 @@ type App = {
   cards?: number
   // The app's records of the other sessions, by session id.
   otherRecords?: Record<string, Record<string, unknown>>
+  // The file times of other sessions' records, where a test sets them.
+  otherTimes?: Record<string, number>
+  // The most sessions a list can hold before Claude Code won't pass it on.
+  listCap?: number
   // Every path the mod read or checked the time of.
   readPaths?: string[]
   // How many times the mod read this session from the app.
@@ -114,8 +118,29 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   // The engine may hand paths over in Windows form.
   const norm = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
   const OTHER = new RegExp(`^${DATA}/claude_abc/claude-code-sessions/org/acct/(local_\\w+)\\.json$`)
+  // The app keeps each session's title in its file too.
+  const otherAt = (id: string) => {
+    const record = app.otherRecords?.[id]
+    const listed = app.others?.find(session => session.sessionId === id)
+    return record === undefined || listed === undefined ? record : { ...record, title: listed.title }
+  }
   const recordAt = (path: string) =>
-    norm(path) === RECORD ? app.record : app.otherRecords?.[OTHER.exec(norm(path))?.[1] ?? '']
+    norm(path) === RECORD ? app.record : otherAt(OTHER.exec(norm(path))?.[1] ?? '')
+  // The file's time changes whenever the record does, unless the test sets it.
+  const timeOf = (path: string, record: unknown) => {
+    const time = app.otherTimes?.[OTHER.exec(norm(path))?.[1] ?? '']
+    if (time !== undefined) return time
+    const json = JSON.stringify(record)
+    let mtimeMs = 0
+    for (let i = 0; i < json.length; i += 1) mtimeMs = (mtimeMs * 31 + json.charCodeAt(i)) % 1_000_000_007
+    return mtimeMs
+  }
+  const ACCOUNT = `${DATA}/claude_abc/claude-code-sessions/org/acct`
+  const files = () =>
+    [RECORD, ...Object.keys(app.otherRecords ?? {}).map(id => `${ACCOUNT}/${id}.json`)].flatMap(file => {
+      const record = recordAt(file)
+      return record === undefined ? [] : [{ name: file.slice(ACCOUNT.length + 1), kind: 'file' as const, size: 0, mtimeMs: timeOf(file, record), isLink: false }]
+    })
   const hasRecords = () => app.record !== undefined || app.otherRecords !== undefined
   on('fs.exists', (_, e) => ({
     value: hasRecords() && ([DATA, `${DATA}/claude_abc/claude-code-sessions`].includes(norm(e.path)) || recordAt(e.path) !== undefined),
@@ -125,6 +150,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       norm(e.path) === DATA ? [dir('claude_abc')]
       : norm(e.path).endsWith('claude-code-sessions') ? [dir('org')]
       : norm(e.path).endsWith('/org') ? [dir('acct')]
+      : norm(e.path) === ACCOUNT ? files()
       : [],
   }))
   on('fs.read', (_, e) => {
@@ -134,15 +160,11 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (norm(e.path) === RECORD) app.fileReads = (app.fileReads ?? 0) + 1
     return { value: JSON.stringify(record) }
   })
-  // The file's time changes whenever the record does.
   on('fs.stat', (_, e) => {
     app.readPaths?.push(norm(e.path))
     const record = recordAt(e.path)
     if (record === undefined) throw new Error(`ENOENT ${e.path}`)
-    const json = JSON.stringify(record)
-    let mtimeMs = 0
-    for (let i = 0; i < json.length; i += 1) mtimeMs = (mtimeMs * 31 + json.charCodeAt(i)) % 1_000_000_007
-    return { value: { kind: 'file' as const, size: json.length, mtimeMs, isLink: false } }
+    return { value: { kind: 'file' as const, size: JSON.stringify(record).length, mtimeMs: timeOf(e.path, record), isLink: false } }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'dots' } }))
@@ -173,6 +195,8 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   on('mcp.call', async (_, e) => {
     app.calls = (app.calls ?? 0) + 1
     if (app.isMissing || app.isConnecting) throw new Error(`no MCP server named ${e.server}`)
+    const asked = app.others?.find(session => session.sessionId === e.args.session_id)
+    if (e.tool === 'get_session' && asked) return { value: text(JSON.stringify(asked)) }
     if (e.tool === 'get_session') {
       app.reads = (app.reads ?? 0) + 1
       if (app.isStuckReading) return new Promise<never>(() => undefined)
@@ -181,7 +205,13 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     if (e.tool === 'list_sessions') {
       // As many as asked for, newest first, 20 when the call doesn't say.
       const limit = typeof e.args.limit === 'number' ? e.args.limit : 20
-      return { value: text(JSON.stringify((app.others ?? []).slice(0, limit))) }
+      // Archived sessions only when asked for.
+      const list = (app.others ?? []).filter(session => e.args.include_archived === true || !session.isArchived).slice(0, limit)
+      // What Claude Code hands back for an answer past its size limit.
+      if (app.listCap !== undefined && list.length > app.listCap) {
+        return { value: text('Error: result (79,049 characters across 1,959 lines) exceeds maximum allowed tokens. Output has been saved to /tmp/list.txt') }
+      }
+      return { value: text(JSON.stringify(list)) }
     }
     if (e.tool === 'get_window_layout') {
       app.layoutChecks = (app.layoutChecks ?? 0) + 1
@@ -1754,6 +1784,80 @@ test('the sweep reaches a session whose last turn was long ago, past many newer 
   expect(others[120]?.title).toBe('🟢 Old')
 })
 
+// Sessions the app lists, newest first: green ones with no files, then the given ones.
+const newer = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({ sessionId: `local_n${i}`, title: `🟢 Newer ${i}`, isRunning: false }))
+const SEEN = { lastTurnEdgeAt: 100, lastFocusedAt: 200 }
+
+test('a session list too long for Claude Code to pass on is still swept, the rest from their files', async ($, on) => {
+  mock.store(on)
+  const others = [...newer(5), { sessionId: 'local_early', title: '🔵 Early', isRunning: false }, ...newer(30), { sessionId: 'local_late', title: '🔵 Late', isRunning: false }]
+  const otherRecords: Record<string, Record<string, unknown>> = { local_early: SEEN, local_late: SEEN }
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, others, otherRecords, listCap: 30 }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(1_000)
+  expect(others[5]?.title).toBe('🟢 Early')
+  expect(others[36]?.title).toBe('🟢 Late')
+})
+
+test('past the list, a running session and an archived one keep their dots', async ($, on) => {
+  mock.store(on)
+  const others = [...newer(60), { sessionId: 'local_run', title: '🔵 Run', isRunning: true }, { sessionId: 'local_arch', title: '🔵 Arch', isRunning: false }]
+  const otherRecords: Record<string, Record<string, unknown>> = { local_run: SEEN, local_arch: { ...SEEN, isArchived: true } }
+  const otherTimes: Record<string, number> = { local_run: 1, local_arch: 1 }
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, others, otherRecords, otherTimes }
+  const clock = engine(on, app)
+  await clock.advance(10_000)
+  await start($)
+  await clock.advance(1_000)
+  expect(others[60]?.title).toBe('🔵 Run')
+  expect(others[61]?.title).toBe('🔵 Arch')
+
+  // Once it stops running, the next look gets it, though its file hasn't changed.
+  const run = others[60]
+  if (run) run.isRunning = false
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(1_000)
+  expect(others[60]?.title).toBe('🟢 Run')
+})
+
+test("past the list, the first look goes back a day, and a later click is caught", async ($, on) => {
+  mock.store(on)
+  const DAY = 24 * 60 * 60 * 1000
+  const others = [...newer(60), { sessionId: 'local_old', title: '🟡 Old', isRunning: false }]
+  const otherRecords: Record<string, Record<string, unknown>> = { local_old: { turnWrapUp: { description: 'x' }, ...SEEN } }
+  const otherTimes: Record<string, number> = { local_old: DAY }
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, others, otherRecords, otherTimes }
+  const clock = engine(on, app)
+  await clock.advance(3 * DAY)
+  await start($)
+  await clock.advance(1_000)
+  expect(others[60]?.title).toBe('🟡 Old')
+
+  otherRecords.local_old = { turnWrapUp: { description: 'x' }, lastTurnEdgeAt: 100, lastFocusedAt: 3 * DAY }
+  otherTimes.local_old = 3 * DAY + 2_000
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(1_000)
+  expect(others[60]?.title).toBe('🟢 Old')
+})
+
+test('/dots off takes the dot off every session but yours, even when the list is too long to pass on', async ($, on) => {
+  mock.store(on)
+  const others = Array.from({ length: 45 }, (_, i) => ({ sessionId: `local_s${i}`, title: `🟢 S${i}` }))
+  const otherRecords = Object.fromEntries(others.map(session => [session.sessionId, {}])) as Record<string, Record<string, unknown>>
+  otherRecords.local_s40 = { titleSource: 'user' }
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, others, otherRecords, listCap: 30, canApprove: true }
+  engine(on, app)
+  await start($)
+
+  const reply = await dots($, 'off')
+  expect(others.filter(session => session.title.startsWith('🟢')).map(session => session.title)).toEqual(['🟢 S40'])
+  expect(JSON.stringify(reply)).toContain('44 other sessions')
+})
+
 test("with the dots off, other sessions' dots are left alone", async ($, on) => {
   sharedStore(on, { isOff: true })
   const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, ...idle() }
@@ -1889,6 +1993,21 @@ test("/dots off doesn't build a file path from a session id of an unexpected sha
   await dots($, 'off')
   expect(app.readPaths?.some(path => path.includes('evil'))).toBe(false)
   expect(others[0]?.title).toBe('🟢 Odd id')
+})
+
+test('/dots off takes the dot off archived sessions too', async ($, on) => {
+  mock.store(on)
+  const others = [
+    { sessionId: 'local_2', title: '🟢 Other done' },
+    { sessionId: 'local_3', title: '🔵 Put away', isArchived: true },
+  ]
+  const app: App = { title: 'This one', source: 'tool', renames: [], others, record: { titleSource: 'tool' } }
+  engine(on, app)
+  await start($)
+
+  const off = await dots($, 'off')
+  expect(others.map(session => session.title)).toEqual(['Other done', 'Put away'])
+  expect(off.text).toBe('Status dots are off. Also took the dot off 2 other sessions.')
 })
 
 test('/dots off leaves alone other sessions you named yourself', async ($, on) => {
