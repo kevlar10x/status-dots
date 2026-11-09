@@ -103,7 +103,7 @@ It has no hook on permission checks, so it never takes part in a permission deci
 ## Limits
 
 - Tested on Windows only.
-- A stale dot on a session whose process isn't running turns green only when another session starts or finishes a turn, so with nothing else running it can stay a while.
+- A stale dot on a session whose process isn't running turns green only when another session starts or finishes a turn, so with nothing else running it can stay a while. The mod looks at your 200 most recently active sessions, archived ones left out.
 - The app's record comes from a file the app keeps for itself, under `%LOCALAPPDATA%\Claude-Data` on Windows. If the mod can't find or read it, on another system or after an app update that changes it, the dot comes from the mod's own checks alone.
 - The app heads its Windows notifications with the session's title. The dot comes off just before a turn ends and before a question or a plan goes up, so those notifications have no dot, and the title goes without one for a moment each time. A permission prompt's notification can still show the white dot, because the app reads the title as the prompt goes up, before a mod can change it. The line under the title is the app's own summary of the turn, which a mod can't change.
 - The mod can't see the cards the app puts up itself, so it guesses from how long a call takes. A card answered within its 2 or 20 seconds never turns the dot yellow, and a notification for one can show the white dot.

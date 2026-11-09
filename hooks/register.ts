@@ -741,7 +741,8 @@ async function settleOthers($: Engine) {
   if (isOff) return
   const path = await findRecord($)
   if (path === undefined) return
-  const listed = await call($, SESSIONS, 'list_sessions', { limit: 50 })
+  // The list runs newest first, and a session left yellow days ago is far down it.
+  const listed = await call($, SESSIONS, 'list_sessions', { limit: 200 })
   if (listed.isError || isOff) return
   const folder = path.slice(0, path.lastIndexOf('/'))
   const sessions = JSON.parse(textOf(listed)) as { sessionId?: string; title?: string; isRunning?: boolean }[]

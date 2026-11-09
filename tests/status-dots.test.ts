@@ -178,7 +178,11 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
       if (app.isStuckReading) return new Promise<never>(() => undefined)
       return { value: text(JSON.stringify({ sessionId: 'local_1', title: app.title })) }
     }
-    if (e.tool === 'list_sessions') return { value: text(JSON.stringify(app.others ?? [])) }
+    if (e.tool === 'list_sessions') {
+      // As many as asked for, newest first, 20 when the call doesn't say.
+      const limit = typeof e.args.limit === 'number' ? e.args.limit : 20
+      return { value: text(JSON.stringify((app.others ?? []).slice(0, limit))) }
+    }
     if (e.tool === 'get_window_layout') {
       app.layoutChecks = (app.layoutChecks ?? 0) + 1
       await app.layoutHold
@@ -1734,6 +1738,20 @@ test("the sweep of other sessions doesn't build a file path from a session id of
   await clock.advance(1_000)
   expect(app.readPaths?.some(path => path.includes('evil'))).toBe(false)
   expect(others[0]?.title).toBe('🔵 Odd id')
+})
+
+test('the sweep reaches a session whose last turn was long ago, past many newer ones', async ($, on) => {
+  mock.store(on)
+  const others = Array.from({ length: 120 }, (_, i) => ({ sessionId: `local_n${i}`, title: `🟢 Newer ${i}`, isRunning: false }))
+  others.push({ sessionId: 'local_old', title: '🟡 Old', isRunning: false })
+  const otherRecords: Record<string, Record<string, unknown>> = {
+    local_old: { turnWrapUp: { description: 'x' }, lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+  }
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, others, otherRecords }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(1_000)
+  expect(others[120]?.title).toBe('🟢 Old')
 })
 
 test("with the dots off, other sessions' dots are left alone", async ($, on) => {
