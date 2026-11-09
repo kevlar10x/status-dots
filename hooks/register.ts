@@ -111,6 +111,8 @@ let isOff = false
 const waits = new Set<symbol>()
 // The turn's end-of-turn box asks you something.
 let isAsking = false
+// And that question stops the work until you answer it.
+let isBlocking = false
 // While the dot is blue: the next check for whether you've opened the session.
 let seenCheck: Timer | undefined
 let seenChecks = 0
@@ -131,6 +133,9 @@ let hasTasks = false
 let dotBefore: Status | undefined
 let isDotBeforeKnown = false
 let wasAsking = false
+let wasBlocking = false
+// Other sessions' records found to need no change, by the file's time.
+const settled = new Map<string, number>()
 // The dot came off for a question, and this brings yellow in behind it.
 let yellowSoon: Timer | undefined
 // After a turn: the next look for the app's verdict on it.
@@ -598,6 +603,34 @@ async function hasSeen($: Engine) {
   return isOnScreen($)
 }
 
+// Whether you've come back to this session since its next-step box asked you
+// something that didn't stop the work. Being on screen as it asked doesn't count.
+async function hasSeenQuestion($: Engine) {
+  if (isBlocking) return false
+  try {
+    const latest = await loadRecord($)
+    return latest !== undefined && !latest.record.turnWrapUp?.needsUser && wasClicked(latest.record)
+  } catch {
+    return false
+  }
+}
+
+// Whether the dot waits for you to open the session: blue, or yellow for a
+// question in the next-step box.
+function isWatched() {
+  return wanted === 'fresh' || (wanted === 'waiting' && isAsking)
+}
+
+// Seen: blue turns green, and so does a question's yellow, the question still
+// there for you to answer.
+function showSeen($: Engine) {
+  if (wanted === 'waiting') {
+    isAsking = false
+    holdTurn($, hasTasks ? { isWorking: false, isAsking, hasTasks } : { isWorking: false, isAsking })
+  }
+  show($, hasTasks ? 'working' : 'done')
+}
+
 // A finished session stays blue until you've opened it, then turns green.
 async function showFinished($: Engine) {
   if (isUserTitle) return
@@ -618,19 +651,20 @@ function seenDelay() {
   return SEEN_STEPS[SEEN_STEPS.length - 1]?.everyMs ?? 15000
 }
 
-// Checks while the dot is blue, less often the longer it stays blue, and stops
-// once it isn't.
+// Checks while the dot is blue, or yellow for a question in the next-step box,
+// less often the longer it stays, and stops once it isn't.
 function watchUntilSeen($: Engine, isNew = false) {
   if (isNew) seenChecks = 0
   seenCheck?.cancel()
   seenCheck = $.clock.after(seenDelay(), async () => {
     seenCheck = undefined
     seenChecks += 1
-    if (wanted !== 'fresh') return
-    const isSeen = await hasSeen($)
+    if (!isWatched()) return
+    const isBlue = wanted === 'fresh'
+    const isSeen = isBlue ? await hasSeen($) : await hasSeenQuestion($)
     // A turn may have started while the check was out.
-    if (wanted !== 'fresh') return
-    if (isSeen) show($, 'done')
+    if (!isWatched() || isBlue !== (wanted === 'fresh')) return
+    if (isSeen) showSeen($)
     // Where no app has answered (a terminal session), nothing will ever say you've seen it.
     else if (sessionId !== undefined) watchUntilSeen($)
   })
@@ -669,6 +703,7 @@ async function checkAtStart($: Engine, triesLeft: number) {
     if (triesLeft > 0) $.clock.after(START_RETRY_MS, () => void checkAtStart($, triesLeft - 1).catch(() => undefined))
     return
   }
+  void settleOthers($).catch(() => undefined)
   if (hasTurned) return
   if (isOff) {
     if (DOT.test(title)) show($, undefined)
@@ -691,10 +726,50 @@ async function checkAtStart($: Engine, triesLeft: number) {
     })
     return
   }
-  if (wanted !== 'fresh') return
-  if (await hasSeen($)) {
-    if (!hasTurned && wanted === 'fresh') show($, 'done')
+  if (!isWatched()) return
+  const isBlue = wanted === 'fresh'
+  if (isBlue ? await hasSeen($) : await hasSeenQuestion($)) {
+    if (!hasTurned && isWatched() && isBlue === (wanted === 'fresh')) showSeen($)
   } else watchUntilSeen($, true)
+}
+
+// A session with no process running can't follow your clicks, so one that runs
+// does it for the others: a blue dot, or yellow for a question in the
+// next-step box that didn't stop the work, turns green once you've opened
+// that session since its last turn.
+async function settleOthers($: Engine) {
+  if (isOff) return
+  const path = await findRecord($)
+  if (path === undefined) return
+  const listed = await call($, SESSIONS, 'list_sessions', { limit: 50 })
+  if (listed.isError || isOff) return
+  const folder = path.slice(0, path.lastIndexOf('/'))
+  const sessions = JSON.parse(textOf(listed)) as { sessionId?: string; title?: string; isRunning?: boolean }[]
+  for (const session of sessions) {
+    const id = session.sessionId ?? ''
+    const title = session.title?.trim() ?? ''
+    const status = statusOf(title)
+    // A session whose process runs looks after its own dot. The id becomes
+    // part of a file path, so one of another shape is left alone.
+    if (session.isRunning !== false || (status !== 'fresh' && status !== 'waiting') || !SESSION_ID.test(id)) continue
+    const file = `${folder}/${id}.json`
+    try {
+      const { mtimeMs } = await $.fs.stat(file)
+      if (settled.get(id) === mtimeMs) continue
+      const record = JSON.parse(await $.fs.read(file)) as AppRecord
+      const isSeen = typeof record.lastFocusedAt === 'number' && typeof record.lastTurnEdgeAt === 'number' && record.lastFocusedAt > record.lastTurnEdgeAt
+      const isQuestion = record.turnWrapUp !== undefined && !record.turnWrapUp.needsUser
+      // A title you named yourself is left alone, so no approval card goes up.
+      if (!isSeen || record.titleSource === 'user' || (status === 'waiting' && !isQuestion)) {
+        settled.set(id, mtimeMs)
+        continue
+      }
+      await call($, SESSIONS, 'set_session_title', { session_id: id, title: dotted(title, 'done') })
+    } catch (error) {
+      // Held on an approval card: the rest would each put up another.
+      if (error instanceof TimedOut) return
+    }
+  }
 }
 
 // Back to working once nothing waits on you. Tool calls only return inside a
@@ -731,10 +806,12 @@ export const register: Register = on => {
   on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) {
       wasAsking = isAsking
+      wasBlocking = isBlocking
       isDotBeforeKnown = waits.size > 0 || wanted !== undefined || knownTitle !== undefined
       // Yellow for a wait still out isn't put back: the turn finishes as usual.
       dotBefore = waits.size > 0 ? 'working' : wanted ?? (knownTitle === undefined ? undefined : statusOf(knownTitle))
       isAsking = false
+      isBlocking = false
       isCleared = false
       hasTasks = false
       holdTurn($, { isWorking: true, isAsking: false })
@@ -776,10 +853,15 @@ export const register: Register = on => {
     // turn asks you something or left work running.
     if (e.reason === 'answer' && !isAsking && !hasTasks && isDotBeforeKnown && dotBefore !== 'working' && FILLER.test(e.answer.trim())) {
       isAsking = wasAsking
+      isBlocking = wasBlocking
       holdTurn($, { isWorking: false, isAsking })
       // Blue stays until you've opened the session since its last real finish.
       if (dotBefore === 'fresh') void showFinished($)
-      else show($, dotBefore)
+      else {
+        show($, dotBefore)
+        if (isWatched()) watchUntilSeen($, true)
+      }
+      void settleOthers($).catch(() => undefined)
       return result
     }
     finishedAt = await $.clock.now()
@@ -793,7 +875,10 @@ export const register: Register = on => {
     }
     // Stopped by you: no dot, since you were there to see it.
     else show($, e.reason === 'answer' ? 'waiting' : e.reason === 'aborted' ? undefined : 'failed')
+    // A question in the next-step box stays yellow until you come back to it.
+    if (e.reason === 'answer' && isAsking) watchUntilSeen($, true)
     if (e.reason === 'answer') followVerdict($)
+    void settleOthers($).catch(() => undefined)
 
     return result
   })
@@ -825,6 +910,7 @@ export const register: Register = on => {
       const ask = (e as { ask?: unknown }).ask
       if (typeof ask === 'string' && ask.trim() !== '') {
         isAsking = true
+        isBlocking = (e as { blocked?: unknown }).blocked === true
         holdTurn($, { isWorking: true, isAsking: true })
       }
     }

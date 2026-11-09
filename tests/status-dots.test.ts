@@ -11,7 +11,7 @@ type App = {
   title?: string
   source: 'auto' | 'tool' | 'user'
   renames: string[]
-  others?: { sessionId: string; title: string }[]
+  others?: { sessionId: string; title: string; isRunning?: boolean }[]
   // Whether the app shows this session in a window; shown unless a test says not.
   isOffScreen?: boolean
   // The window is split and another session's pane has the focus.
@@ -33,7 +33,7 @@ type App = {
   cards?: number
   // The app's records of the other sessions, by session id.
   otherRecords?: Record<string, Record<string, unknown>>
-  // Every file the mod read, when a test wants to know.
+  // Every path the mod read or checked the time of.
   readPaths?: string[]
   // How many times the mod read this session from the app.
   reads?: number
@@ -136,6 +136,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   })
   // The file's time changes whenever the record does.
   on('fs.stat', (_, e) => {
+    app.readPaths?.push(norm(e.path))
     const record = recordAt(e.path)
     if (record === undefined) throw new Error(`ENOENT ${e.path}`)
     const json = JSON.stringify(record)
@@ -1486,6 +1487,42 @@ test('a dot reply keeps the yellow of a question still in the next-step box', as
   expect(held.turn).toEqual({ isWorking: false, isAsking: true })
 })
 
+test("after a dot reply, a question's yellow still turns green once you come back", async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await clock.advance(1_000)
+  await end($, 'answer')
+  await begin($)
+  await end($, 'answer', undefined, '.')
+  await clock.advance(30_000)
+  expect(app.title).toBe('🟡 Hub')
+  app.record = { lastFocusedAt: 40_000 }
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Hub')
+})
+
+test('after a dot reply, a question that stops the work stays yellow after you come back', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', blocked: true })
+  await clock.advance(1_000)
+  await end($, 'answer')
+  await begin($)
+  await end($, 'answer', undefined, '.')
+  app.record = { lastFocusedAt: 40_000 }
+  await clock.advance(60_000)
+  expect(app.title).toBe('🟡 Hub')
+})
+
 test('a dot reply keeps red after an error', async ($, on) => {
   mock.store(on)
   const app: App = { title: 'Hub', source: 'tool', renames: [] }
@@ -1564,6 +1601,150 @@ test("a dot reply in a process that just started keeps the title's dot", async (
   await end($, 'answer', undefined, '·')
   await clock.advance(60_000)
   expect(app.title).toBe('🟢 Hub')
+})
+
+test('yellow for a question in the next-step box turns green once you come back to the session', async ($, on) => {
+  mock.store(on)
+  const held = sharedState(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await clock.advance(1_000)
+  await end($, 'answer')
+  // On screen as it ends, but not clicked since.
+  await clock.advance(30_000)
+  expect(app.title).toBe('🟡 Hub')
+  app.record = { lastFocusedAt: 40_000 }
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Hub')
+  expect(held.turn).toEqual({ isWorking: false, isAsking: false })
+})
+
+test('a question that stops the work stays yellow after you come back', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?', blocked: true })
+  await clock.advance(1_000)
+  await end($, 'answer')
+  app.record = { lastFocusedAt: 40_000 }
+  await clock.advance(60_000)
+  expect(app.title).toBe('🟡 Hub')
+})
+
+test('a question the app records as stopping the work stays yellow after you come back', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Hub', source: 'tool', renames: [], record: { lastFocusedAt: 0 } }
+  const clock = engine(on, app)
+  await start($)
+
+  await begin($)
+  await tool($, { tool: 'mcp__ccd_turn__wrap_up', recap: 'Built it.', ask: 'Publish it?' })
+  await clock.advance(1_000)
+  await end($, 'answer')
+  app.record = { lastFocusedAt: 40_000, turnWrapUp: { needsUser: 'Publish it?' } }
+  await clock.advance(60_000)
+  expect(app.title).toBe('🟡 Hub')
+})
+
+test("a question's yellow from before a restart turns green once you've opened the session", async ($, on) => {
+  mock.store(on)
+  const app: App = {
+    title: '🟡 Hub',
+    source: 'tool',
+    renames: [],
+    record: { turnWrapUp: { description: 'Built it.' }, lastTurnEdgeAt: 100, lastFocusedAt: 50 },
+  }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(30_000)
+  expect(app.title).toBe('🟡 Hub')
+
+  app.record = { turnWrapUp: { description: 'Built it.' }, lastTurnEdgeAt: 100, lastFocusedAt: 200 }
+  await clock.advance(5_000)
+  expect(app.title).toBe('🟢 Hub')
+})
+
+test('a yellow dot with no next-step question behind it stays yellow at start after a click', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: '🟡 Hub', source: 'tool', renames: [], record: { lastTurnEdgeAt: 100, lastFocusedAt: 200 } }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(30_000)
+  expect(app.title).toBe('🟡 Hub')
+})
+
+// Sessions whose process has stopped, as the app lists them, with their records.
+const idle = () => ({
+  others: [
+    { sessionId: 'local_2', title: '🔵 Seen', isRunning: false },
+    { sessionId: 'local_3', title: '🔵 Unseen', isRunning: false },
+    { sessionId: 'local_4', title: '🔵 Running', isRunning: true },
+    { sessionId: 'local_5', title: '🟡 Asked', isRunning: false },
+    { sessionId: 'local_6', title: '🟡 Blocked', isRunning: false },
+    { sessionId: 'local_7', title: '🟡 Card', isRunning: false },
+    { sessionId: 'local_8', title: '🟡 Mine', isRunning: false },
+    { sessionId: 'local_9', title: '🟢 Done', isRunning: false },
+  ],
+  otherRecords: {
+    local_2: { lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_3: { lastTurnEdgeAt: 200, lastFocusedAt: 100 },
+    local_4: { lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_5: { turnWrapUp: { description: 'x' }, lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_6: { turnWrapUp: { needsUser: 'Go?' }, lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_7: { lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_8: { titleSource: 'user', turnWrapUp: { description: 'x' }, lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+    local_9: { lastTurnEdgeAt: 100, lastFocusedAt: 200 },
+  } as Record<string, Record<string, unknown>>,
+})
+
+test('a session that runs turns the dots of opened sessions with no process green', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, canApprove: true, ...idle() }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(1_000)
+
+  expect(app.others?.map(session => session.title)).toEqual([
+    '🟢 Seen', '🔵 Unseen', '🔵 Running', '🟢 Asked', '🟡 Blocked', '🟡 Card', '🟡 Mine', '🟢 Done',
+  ])
+  expect(app.cards ?? 0).toBe(0)
+
+  // Opened later: the next turn's end catches it.
+  const records = app.otherRecords ?? {}
+  records.local_3 = { lastTurnEdgeAt: 200, lastFocusedAt: 300 }
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(1_000)
+  expect(app.others?.[1]?.title).toBe('🟢 Unseen')
+})
+
+test("the sweep of other sessions doesn't build a file path from a session id of an unexpected shape", async ($, on) => {
+  mock.store(on)
+  const others = [{ sessionId: '../../evil', title: '🔵 Odd id', isRunning: false }]
+  const app: App = { title: 'This one', source: 'tool', renames: [], others, record: { titleSource: 'tool' }, otherRecords: {}, readPaths: [] }
+  const clock = engine(on, app)
+  await start($)
+  await clock.advance(1_000)
+  expect(app.readPaths?.some(path => path.includes('evil'))).toBe(false)
+  expect(others[0]?.title).toBe('🔵 Odd id')
+})
+
+test("with the dots off, other sessions' dots are left alone", async ($, on) => {
+  sharedStore(on, { isOff: true })
+  const app: App = { title: 'This one', source: 'tool', renames: [], record: { titleSource: 'tool' }, ...idle() }
+  const clock = engine(on, app)
+  await start($)
+  await begin($)
+  await end($, 'answer')
+  await clock.advance(1_000)
+  expect(app.others?.[0]?.title).toBe('🔵 Seen')
 })
 
 test('a yellow dot that came from a guess goes back to green when the session starts', async ($, on) => {
