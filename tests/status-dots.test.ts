@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine, MockClock } from 'claude-code/testing'
+import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const USER_TITLE_REFUSAL =
@@ -56,6 +56,9 @@ type App = {
   // it, waits for this, as a slow app would.
   layoutHold?: Promise<void>
   renameHold?: Promise<void>
+  // Renames of this session also pass through the tool hooks, raised by
+  // Claude Code (the engine given).
+  echo?: Engine
 }
 
 // A store the test can write to as another session would.
@@ -107,6 +110,19 @@ const flush = async () => {
 }
 
 const RENAME = 'mcp__ccd_session_mgmt__set_session_title'
+
+// Another mod, loaded beneath this one, whose Stop hook calls a tool. This
+// one's hooks see the call.
+const OTHER_MOD: Plugin = {
+  name: 'other-mod',
+  tier: 'append',
+  register: on => {
+    on('classic.Stop', async ($, e, next) => {
+      await $.tool.call({ tool: 'Read', file_path: '/notes.md' } as never)
+      return next(e)
+    })
+  },
+}
 
 // Stands in for the engine, the desktop app's session tools and its data folder.
 // Returns the mocked clock.
@@ -186,7 +202,8 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
   // The tool itself: notes the title while it runs, once the mod has had a
   // moment to write it. Claude's own rename of this session renames it.
   on('tool.call', async (_, e) => {
-    if (e.tool === RENAME) app.title = String((e as { title?: unknown }).title)
+    const { session_id: target, title } = e as { session_id?: unknown; title?: unknown }
+    if (e.tool === RENAME && (target === 'self' || target === 'local_1')) app.title = String(title)
     await flush()
     seen.push(app.title ?? '')
     await app.toolHold
@@ -241,6 +258,7 @@ function engine(on: On, app: App, seen: string[] = [], toasts: string[] = []) {
     app.title = title
     app.source = 'tool'
     app.renames.push(title)
+    await app.echo?.tool.call({ tool: RENAME, session_id: 'self', title } as Parameters<Engine['tool']['call']>[0])
     const replaced = was === undefined || app.isTerse ? '' : ` (was ${JSON.stringify(was)})`
     return { value: text(`Renamed this session to ${JSON.stringify(title)}${replaced}.`) }
   })
@@ -295,6 +313,60 @@ test('the dot is off the moment the turn ends, then the finished dot follows', a
   await begin($)
   await stop($)
   expect(app.stopTitle).toBe('Fix the login bug')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fix the login bug')
+})
+
+test("another mod's tool call at the end of a turn doesn't bring the dot back", { plugins: [OTHER_MOD] }, async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('⚪ Fix the login bug')
+  await stop($)
+  expect(app.stopTitle).toBe('Fix the login bug')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fix the login bug')
+})
+
+test('the dot stays off at the end of a turn when the rename passes through the tool hooks', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [], echo: $ }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('⚪ Fix the login bug')
+  await stop($)
+  expect(app.stopTitle).toBe('Fix the login bug')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Fix the login bug')
+})
+
+test('a dot still being written when the turn ends comes off before the end goes on', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await notify($)
+  expect(app.title).toBe('🟡 Fix the login bug')
+  // Claude goes on after the prompt, and the white dot's write is still out
+  // when the turn ends.
+  const rename = gate()
+  app.renameHold = rename.held
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as Parameters<Engine['tool']['call']>[0])
+  await flush()
+  const stopping = $.classic.Stop({ stop_hook_active: false })
+  await flush()
+  app.renameHold = undefined
+  rename.open()
+  await stopping
+  expect(app.stopTitle).toBe('Fix the login bug')
+  await current.settle()
   await end($, 'answer')
   expect(app.title).toBe('🟢 Fix the login bug')
 })
@@ -2073,6 +2145,19 @@ test('Claude renaming this session keeps the new name and its dot', async ($, on
   expect(app.title).toBe('⚪ Release notes')
   await end($, 'answer')
   expect(app.title).toBe('🟢 Release notes')
+})
+
+test('Claude renaming another session to the same name still moves an answered prompt back to white', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Fix the login bug', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await notify($)
+  expect(app.title).toBe('🟡 Fix the login bug')
+  await tool($, { tool: RENAME, session_id: 'local_2', title: 'Fix the login bug' })
+  expect(app.title).toBe('⚪ Fix the login bug')
 })
 
 test("a write that can't reach the app yet is tried again a second later", async ($, on) => {

@@ -6,6 +6,7 @@ Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
 
 - Yellow for a question in the next-step box now turns green once you click the session, and the question stays in the box. A question that stopped Claude until you answer still stays yellow.
 - A session whose process isn't running can't change its own dot, so a running one now does it for the others. When it starts and after each turn, other sessions' blue dots, and yellow ones from a next-step-box question, turn green if you've clicked those sessions since their last turn. Sessions you named yourself are left alone.
+- End-of-turn notifications could still show the white dot. If a dot was still being written as the turn ended, or another mod called a tool just then, the white dot went back on before the notification went out. It now stays off.
 - With many sessions, `/dots off` left the dots on all your other sessions, because the app's list of them was too long for Claude Code to pass back. It now asks for a shorter list and finds the rest from the app's files.
 
 ## 0.7.1 - 2026-11-04

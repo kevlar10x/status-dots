@@ -101,6 +101,8 @@ const TURN = { plugin: 'status-dots', key: 'turn' } as const
 // The dot this session should show; undefined for none.
 let wanted: Status | undefined
 let isWriting = false
+// The paint writing now, or the last one, so a clear can wait for it.
+let painting: Promise<void> = Promise.resolve()
 // The title as last read or written, so a dot change is one call, not two.
 let knownTitle: string | undefined
 let writeRetry: Timer | undefined
@@ -411,8 +413,14 @@ async function isTurnedOff($: Engine) {
 }
 
 // Writes the wanted dot into the title, one write at a time. A change asked for
-// while a write is out is picked up when that write returns. Never throws.
-async function paint($: Engine) {
+// while a write is out is picked up when that write returns, so the promise is
+// the one of the write that's out. Never throws.
+function paint($: Engine) {
+  if (!isWriting) painting = paintTitle($)
+  return painting
+}
+
+async function paintTitle($: Engine) {
   if (isWriting || isUserTitle) return
   isWriting = true
   let isReachable = true
@@ -877,6 +885,14 @@ async function settleOlder($: Engine, listed: Set<string>, startedAt: number) {
   }
 }
 
+// A rename of this session that changes nothing but its dot: this mod, or
+// another copy of it, writing a dot.
+function isDotWrite(e: { tool: string }) {
+  if (e.tool !== RENAME || knownTitle === undefined) return false
+  const { session_id: target, title } = e as { session_id?: unknown; title?: unknown }
+  return (target === 'self' || target === sessionId) && typeof title === 'string' && title.replace(DOT, '') === knownTitle.replace(DOT, '')
+}
+
 // Back to working once nothing waits on you. Tool calls only return inside a
 // turn, so this needs no turn of its own to have been seen.
 function resume($: Engine) {
@@ -1006,6 +1022,9 @@ export const register: Register = on => {
   // returning moves an answered permission card back to working. When Claude
   // renames this session, the mod reads the new name before its next dot.
   on('tool.call', async ($, e, next) => {
+    // Only Claude's own calls say what the turn is doing. Another mod's call,
+    // or a dot being written to this session's title, passes by untouched.
+    if (next.origin.plugin !== 'engine' || isDotWrite(e)) return next(e)
     // Another mod's Stop hook can keep a turn going after its dot came off.
     if (isCleared && e.agentId === undefined) {
       isCleared = false
