@@ -1,8 +1,8 @@
 # Changelog
 
-Tested on Claude Code 2.1.309 with desktop app 4.4212 (Windows).
+Tested on Claude Code 2.1.321 with desktop app 5.1231 (Windows).
 
-## Unreleased
+## 0.7.2 - 2026-11-13
 
 - Yellow for a question in the next-step box now turns green once you click the session, and the question stays in the box. A question that stopped Claude until you answer still stays yellow.
 - A session whose process isn't running can't change its own dot, so a running one now does it for the others. When it starts and after each turn, other sessions' blue dots, and yellow ones from a next-step-box question, turn green if you've clicked those sessions since their last turn. Sessions you named yourself are left alone.
