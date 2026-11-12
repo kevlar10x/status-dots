@@ -964,6 +964,87 @@ test('/dots off removes the dot and keeps it off; /dots on brings it back', asyn
   expect(app.title).toBe('🟢 Write tests')
 })
 
+test('/dots white off leaves the title without a dot while Claude works; the other dots stay', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Write tests', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  const off = await dots($, 'white off')
+  expect(off.text).toBe(
+    "The white dot is off. Titles have no dot while Claude works, so permission prompts' notifications come without one, and the app's own dot still shows that a session is working. Other sessions follow from their next turn.",
+  )
+  await begin($)
+  expect(app.title).toBe('Write tests')
+  // A permission prompt still turns it yellow, and answering it takes the dot off again.
+  await notify($)
+  expect(app.title).toBe('🟡 Write tests')
+  await tool($, { tool: 'Bash', command: 'ls' })
+  expect(app.title).toBe('Write tests')
+  await end($, 'answer')
+  expect(app.title).toBe('🟢 Write tests')
+
+  const back = await dots($, 'white on')
+  expect(back.text).toBe('The white dot is back while Claude works. Other sessions follow from their next turn.')
+  await begin($)
+  expect(app.title).toBe('⚪ Write tests')
+})
+
+test('/dots white off takes the white dot off a turn already running', async ($, on) => {
+  mock.store(on)
+  const app: App = { title: 'Write tests', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('⚪ Write tests')
+  await dots($, 'white')
+  expect(app.title).toBe('Write tests')
+  await dots($, 'white')
+  expect(app.title).toBe('⚪ Write tests')
+})
+
+test('the white dot turned off in another session stays off from the next turn here', async ($, on) => {
+  const saved = sharedStore(on)
+  const app: App = { title: 'Long build', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  expect(app.title).toBe('⚪ Long build')
+  await end($, 'answer')
+  saved.isWhiteOff = true
+  await begin($)
+  expect(app.title).toBe('Long build')
+  // Background work still running at the end keeps no dot either.
+  await stopWith($, [TASK])
+  await end($, 'answer')
+  expect(app.title).toBe('Long build')
+})
+
+test('with the white dot already off, a new session never writes one', async ($, on) => {
+  sharedStore(on, { isWhiteOff: true })
+  const app: App = { title: 'Fresh start', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  await begin($)
+  await end($, 'answer')
+  expect(app.renames).toEqual(['🟢 Fresh start'])
+})
+
+test('/dots white goes by the setting another session saved', async ($, on) => {
+  const saved = sharedStore(on)
+  const app: App = { title: 'Write tests', source: 'auto', renames: [] }
+  engine(on, app)
+  await start($)
+
+  saved.isWhiteOff = true
+  const toggled = await dots($, 'white')
+  expect(toggled.text).toBe('The white dot is back while Claude works. Other sessions follow from their next turn.')
+  expect(saved.isWhiteOff).toBe(false)
+})
+
 test('/dots off also takes the dot off other sessions, and leaves titles without one alone', async ($, on) => {
   mock.store(on)
   const others = [

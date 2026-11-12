@@ -112,6 +112,8 @@ let unreachableRuns = 0
 // The title is one you set, which the app keeps.
 let isUserTitle = false
 let isOff = false
+// /dots white off: the title has no dot while Claude works.
+let isWhiteOff = false
 // Calls waiting for you: a question or a plan, or a call held on a card the
 // app put up. One from a subagent outlasts the main loop's turns.
 const waits = new Set<symbol>()
@@ -426,6 +428,8 @@ async function paintTitle($: Engine) {
   let isReachable = true
   try {
     let status: Status | undefined
+    // The dot that status puts on the title, as of this write.
+    let shown: Status | undefined
     let written: string | undefined
     // A rename that came in while a write was out: the name the dot goes onto.
     let renamed: string | undefined
@@ -443,7 +447,8 @@ async function paintTitle($: Engine) {
         knownTitle = undefined
         return
       }
-      const next = dotted(renamed ?? title, status)
+      shown = dotFor(status)
+      const next = dotted(renamed ?? title, shown)
       renamed = undefined
       if (next === title) continue
       if (await isNamedByYou($)) {
@@ -480,7 +485,7 @@ async function paintTitle($: Engine) {
       // Looked at again once the write is in: dots turned off while it was out
       // take this one straight back off.
       if (status !== undefined) await isTurnedOff($)
-    } while (isRenamed || status !== wanted)
+    } while (isRenamed || shown !== dotFor(wanted))
   } catch (error) {
     knownTitle = undefined
     // A rename that doesn't answer is most likely held on an approval card, for
@@ -495,6 +500,11 @@ async function paintTitle($: Engine) {
   }
   if (isReachable) unreachableRuns = 0
   else retryPaint($)
+}
+
+// The dot a status puts on the title: none for working while the white dot is off.
+function dotFor(status: Status | undefined) {
+  return status === 'working' && isWhiteOff ? undefined : status
 }
 
 // Retries while the app's tools may still be connecting. After a few changes
@@ -906,19 +916,23 @@ function cardDelay(tool: string) {
   return BROWSER.test(tool) ? BROWSER_MS : undefined
 }
 
-// Another session may have turned the dots off since this one last looked.
+// Another session may have turned the dots, or the white one, off or on
+// since this one last looked.
 async function refreshOff($: Engine) {
   const isOffNow = (await $.store.get('isOff')) === true
-  if (isOffNow === isOff) return
+  const isWhiteOffNow = (await $.store.get('isWhiteOff')) === true
+  if (isOffNow === isOff && isWhiteOffNow === isWhiteOff) return
   isOff = isOffNow
+  isWhiteOff = isWhiteOffNow
   show($, wanted)
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots on or off' })
+    await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots, or just the white one, on or off' })
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
+    isWhiteOff = (await $.store.get('isWhiteOff')) === true
     void checkAtStart($, START_TRIES).catch(() => undefined)
 
     return result
@@ -1066,6 +1080,17 @@ export const register: Register = on => {
 
   on('command.run', { command: 'dots' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    const white = /^white(?:\s+(on|off))?$/.exec(arg)
+    if (white) {
+      isWhiteOff = white[1] === 'off' ? true : white[1] === 'on' ? false : (await $.store.get('isWhiteOff')) !== true
+      await $.store.set('isWhiteOff', isWhiteOff)
+      show($, wanted)
+      return {
+        text: isWhiteOff
+          ? "The white dot is off. Titles have no dot while Claude works, so permission prompts' notifications come without one, and the app's own dot still shows that a session is working. Other sessions follow from their next turn."
+          : 'The white dot is back while Claude works. Other sessions follow from their next turn.',
+      }
+    }
     isOff = arg === 'off' ? true : arg === 'on' ? false : !isOff
     await $.store.set('isOff', isOff)
     if (isOff) {
