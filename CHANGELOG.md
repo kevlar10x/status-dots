@@ -2,6 +2,10 @@
 
 Tested on Claude Code 2.1.321 with desktop app 5.1231 (Windows).
 
+## Unreleased
+
+- Notifications now start with a few words on what happened in place of the dot, since not every notification reader can show emoji: `Done`, `Done, your call`, `Needs you`, `Question`, `Plan ready`, `Still running`, `Usage limit` or `Error`. `/dots labels off` brings back notifications headed with just the title.
+
 ## 0.7.2 - 2026-11-13
 
 - Yellow for a question in the next-step box now turns green once you click the session, and the question stays in the box. A question that stopped Claude until you answer still stays yellow.

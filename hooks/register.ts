@@ -17,8 +17,9 @@ import type { Turn } from '../types'
 // Hooks don't wait for the title: they set the dot they want and pass their
 // event straight on, and the title catches up a moment later. The app heads its
 // Windows notifications with the title, so the end of a turn, a question and a
-// plan are the exceptions: the dot comes off first, and the notification comes
-// without one.
+// plan are the exceptions: the dot gives way to a word or two on what happened
+// (Done, Needs you, Usage limit), and the notification goes out with those in
+// front instead of an emoji, which not every notification reader can show.
 
 type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 
@@ -26,7 +27,14 @@ type Status = 'working' | 'waiting' | 'fresh' | 'done' | 'failed'
 // for one with something you haven't seen. White is the nearest emoji to the
 // app's grey working dot.
 const DOTS: Record<Status, string> = { working: '⚪', waiting: '🟡', fresh: '🔵', done: '🟢', failed: '🔴' }
-const DOT = /^(?:⚪|🟡|🔵|🟢|🔴) /u
+// What the title says in place of a dot as a notification goes out.
+type Label = 'Done' | 'Done, your call' | 'Needs you' | 'Question' | 'Plan ready' | 'Still running' | 'Usage limit' | 'Error'
+const LABELS: Label[] = ['Done, your call', 'Done', 'Needs you', 'Question', 'Plan ready', 'Still running', 'Usage limit', 'Error']
+// A dot or a label in front of a title. The label's ' · ' keeps a title that
+// just starts with one of its words, such as "Plan: ...", from passing for one.
+const MARK = new RegExp(`^(?:⚪|🟡|🔵|🟢|🔴|(?:${LABELS.join('|')}) ·) `, 'u')
+// The errors that mean you've run out of usage for now.
+const USAGE_ERRORS = new Set(['rate_limit', 'billing_error'])
 const SESSIONS = 'ccd_session_mgmt'
 const WINDOW = 'ccd_window'
 // A blue session checks whether you've opened it every second at first, since
@@ -114,6 +122,10 @@ let isUserTitle = false
 let isOff = false
 // /dots white off: the title has no dot while Claude works.
 let isWhiteOff = false
+// /dots labels off: a notification goes out with the bare title.
+let isLabelsOff = false
+// What the title says in place of a dot while a notification goes out.
+let label: Label | undefined
 // Calls waiting for you: a question or a plan, or a call held on a card the
 // app put up. One from a subagent outlasts the main loop's turns.
 const waits = new Set<symbol>()
@@ -225,9 +237,17 @@ function statusOf(title: string): Status | undefined {
   return (Object.keys(DOTS) as Status[]).find(status => title.startsWith(`${DOTS[status]} `))
 }
 
+function bareOf(title: string) {
+  return title.replace(MARK, '')
+}
+
+function marked(title: string, mark: string | undefined) {
+  const bare = bareOf(title)
+  return mark === undefined ? bare : `${mark} ${bare}`
+}
+
 function dotted(title: string, status: Status | undefined) {
-  const bare = title.replace(DOT, '')
-  return status === undefined ? bare : `${DOTS[status]} ${bare}`
+  return marked(title, status === undefined ? undefined : DOTS[status])
 }
 
 // The app answers a rename with `Renamed this session to "new" (was "old").`
@@ -428,8 +448,8 @@ async function paintTitle($: Engine) {
   let isReachable = true
   try {
     let status: Status | undefined
-    // The dot that status puts on the title, as of this write.
-    let shown: Status | undefined
+    // What that status puts in front of the title, as of this write.
+    let shown: string | undefined
     let written: string | undefined
     // A rename that came in while a write was out: the name the dot goes onto.
     let renamed: string | undefined
@@ -443,12 +463,12 @@ async function paintTitle($: Engine) {
       if (title === undefined) return
       // No title yet. The app names a new session from its first prompt, and a
       // title written before that would stop it from doing so.
-      if (title.replace(DOT, '') === '') {
+      if (bareOf(title) === '') {
         knownTitle = undefined
         return
       }
-      shown = dotFor(status)
-      const next = dotted(renamed ?? title, shown)
+      shown = markOf(status)
+      const next = marked(renamed ?? title, shown)
       renamed = undefined
       if (next === title) continue
       if (await isNamedByYou($)) {
@@ -485,7 +505,7 @@ async function paintTitle($: Engine) {
       // Looked at again once the write is in: dots turned off while it was out
       // take this one straight back off.
       if (status !== undefined) await isTurnedOff($)
-    } while (isRenamed || shown !== dotFor(wanted))
+    } while (isRenamed || shown !== markOf(wanted))
   } catch (error) {
     knownTitle = undefined
     // A rename that doesn't answer is most likely held on an approval card, for
@@ -505,6 +525,14 @@ async function paintTitle($: Engine) {
 // The dot a status puts on the title: none for working while the white dot is off.
 function dotFor(status: Status | undefined) {
   return status === 'working' && isWhiteOff ? undefined : status
+}
+
+// What goes in front of the title: the status's dot or, with none, the label
+// for a notification going out.
+function markOf(status: Status | undefined) {
+  const dot = dotFor(status)
+  if (dot !== undefined) return DOTS[dot]
+  return label === undefined ? undefined : `${label} ·`
 }
 
 // Retries while the app's tools may still be connecting. After a few changes
@@ -534,6 +562,7 @@ async function explainOnce($: Engine) {
 // waits for you, working or finished reads as your turn.
 function show($: Engine, status: Status | undefined) {
   stopYellowSoon()
+  label = undefined
   const isYours = waits.size > 0 && (status === 'working' || status === 'done' || status === 'fresh')
   wanted = isOff ? undefined : isYours ? 'waiting' : status
   writeTries = 0
@@ -546,24 +575,35 @@ function stopYellowSoon() {
 }
 
 // The app heads a notification with the title it holds as the notification
-// goes out, so the dot comes off just before that.
-async function clearDot($: Engine) {
+// goes out, so just before that the dot gives way to what happened.
+async function clearDot($: Engine, said: Label | undefined) {
   wanted = undefined
+  label = isOff || isLabelsOff ? undefined : said
   writeTries = 0
   await Promise.race([paint($), $.clock.sleep(CLEAR_MS)])
 }
 
+// How the turn ends, as its notification says it. A wait still out is a card
+// for you, which matters more than work still running.
+function endLabel(reply: string | undefined): Label | undefined {
+  if (isBlocking || waits.size > 0) return 'Needs you'
+  if (isAsking) return 'Done, your call'
+  if (hasTasks) return 'Still running'
+  // A reply of only a dot puts the dot from before back, and says nothing.
+  return reply !== undefined && FILLER.test(reply.trim()) ? undefined : 'Done'
+}
+
 // The turn is ending: the finished dot follows when it has.
-async function clearForEnd($: Engine) {
+async function clearForEnd($: Engine, said: Label | undefined) {
   isCleared = true
-  await clearDot($)
+  await clearDot($, said)
 }
 
 // A question or a plan is about to stop for you: yellow follows once it's on
 // screen.
-async function clearForQuestion($: Engine) {
+async function clearForQuestion($: Engine, said: Label) {
   stopYellowSoon()
-  await clearDot($)
+  await clearDot($, said)
   yellowSoon = $.clock.after(YELLOW_DELAY_MS, () => show($, 'waiting'))
 }
 
@@ -602,7 +642,7 @@ async function otherFiles($: Engine, skip: Set<string>) {
 }
 
 async function clearOne($: Engine, id: string, title: string) {
-  const result = await call($, SESSIONS, 'set_session_title', { session_id: id, title: title.replace(DOT, '') })
+  const result = await call($, SESSIONS, 'set_session_title', { session_id: id, title: bareOf(title) })
   return !result.isError
 }
 
@@ -619,7 +659,7 @@ async function clearOthers($: Engine) {
       const title = session.title?.trim() ?? ''
       // A title you named yourself is yours, a dot in front included: renaming
       // it would put up an approval card for each one.
-      if (!DOT.test(title) || (await isOtherNamedByYou($, id))) continue
+      if (!MARK.test(title) || (await isOtherNamedByYou($, id))) continue
       if (await clearOne($, id, title)) cleared += 1
     }
     if (listed.isAll) return cleared
@@ -631,7 +671,7 @@ async function clearOthers($: Engine) {
         continue
       }
       const title = typeof record.title === 'string' ? record.title.trim() : ''
-      if (DOT.test(title) && record.titleSource !== 'user' && (await clearOne($, id, title))) cleared += 1
+      if (MARK.test(title) && record.titleSource !== 'user' && (await clearOne($, id, title))) cleared += 1
     }
   } catch (error) {
     // Held on an approval card: the rest would each put up another.
@@ -781,7 +821,7 @@ async function checkAtStart($: Engine, triesLeft: number) {
   void settleOthers($).catch(() => undefined)
   if (hasTurned) return
   if (isOff) {
-    if (DOT.test(title)) show($, undefined)
+    if (MARK.test(title)) show($, undefined)
     return
   }
   wanted = statusOf(title)
@@ -801,7 +841,11 @@ async function checkAtStart($: Engine, triesLeft: number) {
     })
     return
   }
-  if (!isWatched()) return
+  if (!isWatched()) {
+    // A label left from a turn whose end never came (its process stopped) goes.
+    if (wanted === undefined && MARK.test(title)) show($, undefined)
+    return
+  }
   const isBlue = wanted === 'fresh'
   if (isBlue ? await hasSeen($) : await hasSeenQuestion($)) {
     if (!hasTurned && isWatched() && isBlue === (wanted === 'fresh')) showSeen($)
@@ -895,12 +939,12 @@ async function settleOlder($: Engine, listed: Set<string>, startedAt: number) {
   }
 }
 
-// A rename of this session that changes nothing but its dot: this mod, or
-// another copy of it, writing a dot.
+// A rename of this session that changes nothing but its dot or label: this
+// mod, or another copy of it, writing one.
 function isDotWrite(e: { tool: string }) {
   if (e.tool !== RENAME || knownTitle === undefined) return false
   const { session_id: target, title } = e as { session_id?: unknown; title?: unknown }
-  return (target === 'self' || target === sessionId) && typeof title === 'string' && title.replace(DOT, '') === knownTitle.replace(DOT, '')
+  return (target === 'self' || target === sessionId) && typeof title === 'string' && bareOf(title) === bareOf(knownTitle)
 }
 
 // Back to working once nothing waits on you. Tool calls only return inside a
@@ -916,9 +960,10 @@ function cardDelay(tool: string) {
   return BROWSER.test(tool) ? BROWSER_MS : undefined
 }
 
-// Another session may have turned the dots, or the white one, off or on
-// since this one last looked.
+// Another session may have turned the dots, the white one or the labels off
+// or on since this one last looked.
 async function refreshOff($: Engine) {
+  isLabelsOff = (await $.store.get('isLabelsOff')) === true
   const isOffNow = (await $.store.get('isOff')) === true
   const isWhiteOffNow = (await $.store.get('isWhiteOff')) === true
   if (isOffNow === isOff && isWhiteOffNow === isWhiteOff) return
@@ -929,10 +974,11 @@ async function refreshOff($: Engine) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots, or just the white one, on or off' })
+    await $.command.register({ name: 'dots', description: 'Turn the sidebar status dots, the white one or the notification labels on or off' })
     const result = await next(e)
     isOff = (await $.store.get('isOff')) === true
     isWhiteOff = (await $.store.get('isWhiteOff')) === true
+    isLabelsOff = (await $.store.get('isLabelsOff')) === true
     void checkAtStart($, START_TRIES).catch(() => undefined)
 
     return result
@@ -966,14 +1012,14 @@ export const register: Register = on => {
   on('classic.Stop', async ($, e, next) => {
     if (e.agent_id === undefined) {
       hasTasks = (e.background_tasks ?? []).some(task => !ENDED.has(task.status))
-      await clearForEnd($)
+      await clearForEnd($, endLabel(e.last_assistant_message))
     }
 
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('classic.StopFailure', async ($, e, next) => {
-    if (e.agent_id === undefined) await clearForEnd($)
+    if (e.agent_id === undefined) await clearForEnd($, USAGE_ERRORS.has(e.error) ? 'Usage limit' : 'Error')
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -1061,7 +1107,7 @@ export const register: Register = on => {
       show($, 'waiting')
     })
     try {
-      if (isQuestion) await clearForQuestion($)
+      if (isQuestion) await clearForQuestion($, e.tool === 'ExitPlanMode' ? 'Plan ready' : 'Question')
       return await next(e)
     } finally {
       cardSoon?.cancel()
@@ -1080,6 +1126,16 @@ export const register: Register = on => {
 
   on('command.run', { command: 'dots' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    const labels = /^labels(?:\s+(on|off))?$/.exec(arg)
+    if (labels) {
+      isLabelsOff = labels[1] === 'off' ? true : labels[1] === 'on' ? false : (await $.store.get('isLabelsOff')) !== true
+      await $.store.set('isLabelsOff', isLabelsOff)
+      return {
+        text: isLabelsOff
+          ? "Notifications come headed with just the session's name. Other sessions follow from their next turn."
+          : 'Notifications start with what happened again: Done, Needs you, Usage limit and so on. Other sessions follow from their next turn.',
+      }
+    }
     const white = /^white(?:\s+(on|off))?$/.exec(arg)
     if (white) {
       isWhiteOff = white[1] === 'off' ? true : white[1] === 'on' ? false : (await $.store.get('isWhiteOff')) !== true
