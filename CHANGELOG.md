@@ -2,7 +2,7 @@
 
 Tested on Claude Code 2.1.321 with desktop app 5.1231 (Windows).
 
-## Unreleased
+## 0.8.0 - 2026-11-14
 
 - Notifications now start with a few words on what happened in place of the dot, since not every notification reader can show emoji: `Done`, `Done, your call`, `Needs you`, `Question`, `Plan ready`, `Still running`, `Usage limit` or `Error`. `/dots labels off` brings back notifications headed with just the title.
 
